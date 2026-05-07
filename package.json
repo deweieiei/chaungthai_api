@@ -1,0 +1,30 @@
+{
+  "name": "chaungthai-api",
+  "version": "0.1.0",
+  "description": "ChaungThai backend API (auth + marketplace)",
+  "main": "server.js",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:test": "node scripts/test-connection.js",
+    "db:migrate": "node scripts/migrate.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop chaungthai-api",
+    "pm2:logs": "pm2 logs chaungthai-api"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.4.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.15.4",
+    "zod": "^4.3.6"
+  }
+}
