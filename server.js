@@ -5,8 +5,21 @@ const helmet = require('helmet');
 const config = require('./src/config');
 const db = require('./src/db');
 const errorMw = require('./src/middleware/error');
-const authRoute = require('./src/routes/auth');
-const healthRoute = require('./src/routes/health');
+
+// Routes
+const healthRoute        = require('./src/routes/health');
+const authRoute          = require('./src/routes/auth');
+const usersRoute         = require('./src/routes/users');
+const skillsRoute        = require('./src/routes/skills');
+const locationsRoute     = require('./src/routes/locations');
+const workersRoute       = require('./src/routes/workers');
+const jobsRoute          = require('./src/routes/jobs');
+const matchesRoute       = require('./src/routes/matches');
+const chatRoute          = require('./src/routes/chat');
+const ratingsRoute       = require('./src/routes/ratings');
+const ticketsRoute       = require('./src/routes/tickets');
+const notificationsRoute = require('./src/routes/notifications');
+const adminRoute         = require('./src/routes/admin');
 
 const app = express();
 
@@ -20,8 +33,8 @@ app.use(helmet({
 }));
 
 // Body parser
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // CORS — whitelist + dev-friendly localhost matching
 const LOCAL_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
@@ -44,8 +57,19 @@ app.use(cors({
 }));
 
 // Routes
-app.use('/api/health', healthRoute);
-app.use('/api/auth', authRoute);
+app.use('/api/health',        healthRoute);
+app.use('/api/auth',          authRoute);
+app.use('/api/users',         usersRoute);
+app.use('/api/skills',        skillsRoute);
+app.use('/api/locations',     locationsRoute);
+app.use('/api/workers',       workersRoute);
+app.use('/api/jobs',          jobsRoute);
+app.use('/api/matches',       matchesRoute);
+app.use('/api/chat',          chatRoute);
+app.use('/api/ratings',       ratingsRoute);
+app.use('/api/tickets',       ticketsRoute);
+app.use('/api/notifications', notificationsRoute);
+app.use('/api/admin',         adminRoute);
 
 // 404 + error handlers (must be last)
 app.use(errorMw.notFound);

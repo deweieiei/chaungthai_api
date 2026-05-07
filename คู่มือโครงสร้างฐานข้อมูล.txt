@@ -1,0 +1,883 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║          ChaungThai Platform — คู่มือโครงสร้างฐานข้อมูล (Database Design)  ║
+║          จัดทำโดย: Claude (AI Assistant) | เวอร์ชัน 1.0 | พฤษภาคม 2569    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Server:    110.171.128.44:3306  |  Database: chaungthai
+สถาปัตย์:  DB1 (Production) = ไฟล์นี้  |  DB2 (Secure) = ส่วนท้าย
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ประเภทข้อมูลที่ใช้ — ทำความเข้าใจก่อนอ่าน
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  BIGINT UNSIGNED     เลขจำนวนเต็มบวก 0 – 18,446,744,073,709,551,615 (ใช้กับ ID หลัก)
+  INT UNSIGNED        เลขจำนวนเต็มบวก 0 – 4,294,967,295
+  SMALLINT UNSIGNED   เลขจำนวนเต็มบวก 0 – 65,535 (ใช้กับตารางอ้างอิงที่ข้อมูลไม่เยอะ)
+  TINYINT UNSIGNED    เลขจำนวนเต็มบวก 0 – 255 (ใช้กับ level, stars, tickets)
+  TINYINT             เลขจำนวนเต็ม -128 – 127 (ใช้กับ amount ตั๋วที่อาจติดลบ)
+  TINYINT(1)          Boolean ใช้แทน true/false (0=false, 1=true)
+  DECIMAL(10,2)       ทศนิยม 10 หลัก ทศนิยม 2 ตำแหน่ง (เช่น 99999999.99) ใช้กับเงิน
+  DECIMAL(10,7)       ทศนิยม 10 หลัก ทศนิยม 7 ตำแหน่ง ใช้กับพิกัด GPS
+  VARCHAR(n)          ข้อความยาวสูงสุด n ตัวอักษร
+  TEXT                ข้อความยาวไม่จำกัด (สูงสุด 65,535 bytes)
+  CHAR(n)             ข้อความความยาวคงที่ n ตัวอักษร (เร็วกว่า VARCHAR สำหรับความยาวคงที่)
+  DATETIME            วันและเวลา รูปแบบ YYYY-MM-DD HH:MM:SS
+  ENUM(...)           ค่าที่กำหนดไว้ล่วงหน้า เลือกได้ค่าเดียว
+  JSON                ข้อมูล JSON อิสระ (MySQL 5.7.8+)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ภาพรวมตาราง — จัดกลุ่มตาม Feature
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [ Auth & User ]          users, worker_profiles, otp_codes, refresh_tokens
+  [ Skill Catalog ]        skill_categories, skills, worker_skills
+  [ Location ]             provinces, districts, subdistricts,
+                           worker_service_areas, worker_locations
+  [ Job Lifecycle ]        jobs, job_skills, job_applications, job_matches
+  [ Communication ]        chat_rooms, chat_messages
+  [ Trust & Quality ]      ratings, reports
+  [ Ticket Economy ]       ticket_packages, payments, ticket_transactions
+  [ System ]               notifications, consent_logs, audit_log
+  [ DB2 — Secure ]         kyc_submissions, blacklist, sensitive_access_logs
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 1: Auth & User (มีอยู่แล้ว)
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: users  — ข้อมูลผู้ใช้งานทุกประเภท
+└─────────────────────────────────────────────────────────────────────────────
+  id                   BIGINT UNSIGNED  PK AUTO_INCREMENT
+                       รหัสผู้ใช้ไม่ซ้ำกัน ใช้เป็น Foreign Key ในตารางอื่นทั่วระบบ
+
+  email                VARCHAR(255)  UNIQUE  NOT NULL
+                       อีเมลที่ใช้สมัครหรือ login ต้องไม่ซ้ำกัน
+
+  phone                VARCHAR(20)  UNIQUE
+                       เบอร์โทรศัพท์ (อาจเป็น NULL ถ้าสมัครด้วยอีเมลอย่างเดียว)
+                       ต้องไม่ซ้ำกัน เพราะ 1 เบอร์ = 1 บัญชีเท่านั้น
+
+  password_hash        VARCHAR(255)  NOT NULL
+                       รหัสผ่านที่ผ่านการเข้ารหัสด้วย bcrypt หรือ argon2
+                       ห้ามเก็บรหัสผ่านดิบ (plain text) เด็ดขาด
+
+  first_name           VARCHAR(100)  NOT NULL   ชื่อจริง
+  last_name            VARCHAR(100)  NOT NULL   นามสกุล
+
+  role                 ENUM('customer','worker','admin')  DEFAULT 'customer'
+                       บทบาท: customer=ผู้ว่าจ้าง  worker=ช่าง  admin=ผู้ดูแล
+                       ใช้ filter สิทธิ์การเข้าถึง API ทั่วระบบ
+
+  email_verified_at    DATETIME  (NULL ได้)
+                       วันเวลาที่ยืนยันอีเมลสำเร็จ  NULL = ยังไม่ยืนยัน
+                       ใช้เช็ค: WHERE email_verified_at IS NOT NULL
+
+  phone_verified_at    DATETIME  (NULL ได้)
+                       วันเวลาที่ยืนยันเบอร์โทรสำเร็จ
+
+  is_active            TINYINT(1)  DEFAULT 1
+                       1=บัญชีใช้งานได้  0=ถูกระงับ
+                       ทุก API endpoint ควร filter WHERE is_active=1
+
+  newsletter_opt_in    TINYINT(1)  DEFAULT 0
+                       1=ยินยอมรับอีเมลโปรโมชัน  0=ไม่ต้องการ
+
+  last_login_at        DATETIME   วันเวลา login ล่าสุด (อัพเดททุกครั้งที่ login)
+  created_at           DATETIME   วันสร้างบัญชี
+  updated_at           DATETIME   วันแก้ไขล่าสุด
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: worker_profiles  — โปรไฟล์เพิ่มเติมของ worker (1-to-1 กับ users)
+└─────────────────────────────────────────────────────────────────────────────
+  user_id              BIGINT UNSIGNED  PK + FK → users.id
+                       ใช้ user_id เป็น PK ด้วย แสดงว่า 1 worker = 1 profile เท่านั้น
+
+  bio                  TEXT   คำแนะนำตัว/ประวัติย่อของช่าง แสดงในโปรไฟล์สาธารณะ
+
+  skills               JSON   (legacy) รายการทักษะ เช่น ["ช่างไฟ","ช่างประปา"]
+                       NOTE: ตาราง worker_skills ใหม่จัดการทักษะแบบ relational แทน
+                       ฟิลด์นี้เก็บไว้สำหรับ backward compat หรือ quick display
+
+  service_areas        JSON   (legacy) พื้นที่บริการ เช่น ["กรุงเทพฯ","นนทบุรี"]
+                       NOTE: ตาราง worker_service_areas ใหม่จัดการแบบ relational แทน
+
+  avatar_url           VARCHAR(500)  URL รูปโปรไฟล์ช่าง
+  rating_avg           DECIMAL(3,2)  DEFAULT 0.00   คะแนนเฉลี่ย 0.00–5.00
+  rating_count         INT UNSIGNED  DEFAULT 0       จำนวนรีวิวทั้งหมด
+
+  tickets_balance      INT UNSIGNED  DEFAULT 5
+                       ยอดตั๋วคงเหลือปัจจุบัน ใช้ตรวจสอบก่อนอนุญาตให้สมัครงาน
+                       อัพเดทพร้อมกันกับการเขียน ticket_transactions เสมอ
+
+  is_verified          TINYINT(1)  DEFAULT 0
+                       0=ยังไม่ยืนยัน  1=ผ่าน KYC แล้ว (ได้รับ Verified Badge)
+                       ช่างที่ is_verified=0 รับงานได้เฉพาะ job_level 1-2
+
+  verified_at          DATETIME   วันที่ admin อนุมัติ KYC
+  created_at / updated_at   DATETIME
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: otp_codes  — รหัส OTP สำหรับยืนยันตัวตน
+└─────────────────────────────────────────────────────────────────────────────
+  id           BIGINT UNSIGNED  PK
+  user_id      BIGINT UNSIGNED  FK → users.id  (NULL ได้ กรณีสมัครใหม่ยังไม่มี account)
+  target       VARCHAR(255)     ปลายทางที่ส่ง OTP (เบอร์โทรหรืออีเมล)
+  code_hash    CHAR(64)         SHA-256 hash ของรหัส OTP 6 หลัก
+  purpose      ENUM('verify_email','verify_phone','reset_password')
+  attempts     TINYINT UNSIGNED  DEFAULT 0   จำนวนครั้งที่กรอกผิด (ล็อกเมื่อ >= 5)
+  used_at      DATETIME   วันที่ใช้ OTP สำเร็จ (NULL = ยังไม่ได้ใช้)
+  expires_at   DATETIME   วันหมดอายุ (ปกติ 5-10 นาที)
+  created_at   DATETIME
+
+  การ query ที่ถูกต้อง:
+    SELECT * FROM otp_codes
+    WHERE target=? AND purpose=? AND used_at IS NULL AND expires_at > NOW()
+    ORDER BY created_at DESC LIMIT 1
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: refresh_tokens  — JWT Refresh Token
+└─────────────────────────────────────────────────────────────────────────────
+  id           BIGINT UNSIGNED  PK
+  user_id      BIGINT UNSIGNED  FK → users.id  NOT NULL
+  token_hash   CHAR(64)  UNIQUE   SHA-256 ของ token จริง (ไม่เก็บ token ดิบ)
+  user_agent   VARCHAR(255)       ระบุอุปกรณ์/เบราว์เซอร์
+  ip           VARCHAR(45)        IPv4 หรือ IPv6
+  expires_at   DATETIME           วันหมดอายุ token
+  revoked_at   DATETIME   วันที่ยกเลิก token (NULL = ยังใช้งานได้)
+  created_at   DATETIME
+
+  token ที่ valid: revoked_at IS NULL AND expires_at > NOW()
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 2: Skill Catalog (ใหม่)
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: skill_categories  — หมวดหมู่ทักษะ
+└─────────────────────────────────────────────────────────────────────────────
+  id          INT UNSIGNED  PK AUTO_INCREMENT
+  name_th     VARCHAR(100)  ชื่อภาษาไทย  เช่น "คอมพิวเตอร์และไอที"
+  name_en     VARCHAR(100)  ชื่อภาษาอังกฤษ เช่น "Computer & IT"
+  icon_url    VARCHAR(500)  URL ไอคอน (ไฟล์รูปหรือ icon library)
+  is_active   TINYINT(1)  DEFAULT 1   0=ซ่อนจากหน้าแอป
+  sort_order  SMALLINT UNSIGNED  ลำดับแสดงผลในหน้า UI
+  created_at  DATETIME
+
+  ตัวอย่าง: คอมพิวเตอร์/ไอที, ช่างไฟฟ้า, ช่างประปา, ทำความสะอาด, ดูแลสวน ฯลฯ
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: skills  — ทักษะย่อย
+└─────────────────────────────────────────────────────────────────────────────
+  id           INT UNSIGNED  PK AUTO_INCREMENT
+  category_id  INT UNSIGNED  FK → skill_categories.id
+  name_th      VARCHAR(100)  ชื่อทักษะ เช่น "ติดตั้ง Windows"
+  name_en      VARCHAR(100)
+  description  VARCHAR(255)  คำอธิบายสั้น
+  is_active    TINYINT(1)
+  sort_order   SMALLINT UNSIGNED
+  created_at   DATETIME
+
+  ตัวอย่าง (category: คอมพิวเตอร์):
+    - ติดตั้ง/ลงโปรแกรม Windows
+    - ซ่อมฮาร์ดแวร์คอมพิวเตอร์
+    - แก้ปัญหาไวรัส/มัลแวร์
+    - ติดตั้งกล้องวงจรปิด
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: worker_skills  — ทักษะของช่างแต่ละคน + ราคา + ระดับ
+└─────────────────────────────────────────────────────────────────────────────
+  id           BIGINT UNSIGNED  PK AUTO_INCREMENT
+  worker_id    BIGINT UNSIGNED  FK → worker_profiles.user_id
+  skill_id     INT UNSIGNED     FK → skills.id
+  UNIQUE KEY (worker_id, skill_id)  — ช่างคนนึงมีทักษะเดียวกันได้แค่ 1 แถว
+
+  skill_level  TINYINT UNSIGNED  NOT NULL  DEFAULT 1
+               ระดับความสามารถที่ช่างประเมินตัวเอง:
+               1 = มือใหม่ (beginner)
+               2 = พอใช้ (intermediate)
+               3 = ดี (proficient)
+               4 = เชี่ยวชาญ (advanced)
+               5 = มืออาชีพ (expert/master)
+
+  price_type   ENUM('fixed','per_hour','negotiable')  DEFAULT 'fixed'
+               fixed      = ราคาคงที่ต่องาน (ดู price)
+               per_hour   = คิดรายชั่วโมง (ดู price)
+               negotiable = ต่อรองได้ (price อาจเป็น 0 หรือราคาเริ่มต้น)
+
+  price        DECIMAL(10,2)  DEFAULT 0.00
+               ราคาเป็นบาท (0 = ต่อรองได้, ไม่ได้แปลว่าฟรี)
+
+  description  TEXT   รายละเอียดเพิ่มเติม เช่น "ลง Windows พร้อม Office เริ่ม 200"
+  created_at / updated_at  DATETIME
+
+  ตัวอย่างการ query หาช่างที่มีทักษะ skill_id=1 เรียงตาม ระดับและราคา:
+    SELECT u.first_name, ws.skill_level, ws.price_type, ws.price
+    FROM worker_skills ws
+    JOIN users u ON u.id = ws.worker_id
+    WHERE ws.skill_id = 1 AND ws.worker_id IN (
+      SELECT user_id FROM worker_service_areas WHERE province_id = 1
+    )
+    ORDER BY ws.skill_level DESC, ws.price ASC
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 3: Location (ใหม่)
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: provinces  — จังหวัด
+└─────────────────────────────────────────────────────────────────────────────
+  id       SMALLINT UNSIGNED  PK   (77 จังหวัด ใช้ SMALLINT พอ)
+  name_th  VARCHAR(100)       ชื่อจังหวัดภาษาไทย เช่น "กรุงเทพมหานคร"
+  name_en  VARCHAR(100)       ชื่อภาษาอังกฤษ เช่น "Bangkok"
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: districts  — เขต/อำเภอ
+└─────────────────────────────────────────────────────────────────────────────
+  id           SMALLINT UNSIGNED  PK
+  province_id  SMALLINT UNSIGNED  FK → provinces.id
+  name_th      VARCHAR(100)       เช่น "จตุจักร"
+  name_en      VARCHAR(100)
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: subdistricts  — แขวง/ตำบล
+└─────────────────────────────────────────────────────────────────────────────
+  id           INT UNSIGNED      PK   (มีมากกว่า 65,535 ทั่วประเทศ ใช้ INT)
+  district_id  SMALLINT UNSIGNED FK → districts.id
+  name_th      VARCHAR(100)      เช่น "ลาดยาว"
+  name_en      VARCHAR(100)
+  postal_code  CHAR(5)           รหัสไปรษณีย์ เช่น "10900"
+
+  NOTE: ไฟล์ข้อมูลมาตรฐานทั้งประเทศดาวน์โหลดได้จาก:
+  https://github.com/earthchie/jquery.Thailand.js (DB ภาษาไทยครบ)
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: worker_service_areas  — พื้นที่ที่ช่างรับงาน
+└─────────────────────────────────────────────────────────────────────────────
+  id              BIGINT UNSIGNED   PK AUTO_INCREMENT
+  worker_id       BIGINT UNSIGNED   FK → worker_profiles.user_id
+  province_id     SMALLINT UNSIGNED FK → provinces.id   (บังคับ)
+  district_id     SMALLINT UNSIGNED FK → districts.id   (optional: ระบุให้แม่นยำขึ้น)
+  subdistrict_id  INT UNSIGNED      FK → subdistricts.id (optional)
+
+  ช่าง 1 คนสามารถมีหลาย row = รับงานได้หลายพื้นที่
+
+  ตัวอย่าง ช่าง 9001 รับงานในจตุจักร AND บางกะปิ:
+    (worker_id=9001, province_id=1, district_id=1)
+    (worker_id=9001, province_id=1, district_id=2)
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: worker_locations  — พิกัด GPS ของช่าง (real-time ในอนาคต)
+└─────────────────────────────────────────────────────────────────────────────
+  worker_id         BIGINT UNSIGNED  PK + FK → worker_profiles.user_id
+                    (1 ช่าง = 1 แถว)
+
+  latitude          DECIMAL(10,7)   ละติจูด เช่น 13.8196440
+  longitude         DECIMAL(10,7)   ลองจิจูด เช่น 100.5581580
+
+  service_radius_km SMALLINT UNSIGNED  DEFAULT 10
+                    รัศมีรับงานจากตำแหน่งปัจจุบัน (กิโลเมตร)
+                    ลูกค้าอยู่ใน radius นี้ถึงจะเห็นช่าง
+
+  updated_at        DATETIME  อัพเดททุกครั้งที่ app เปิด (หรือเมื่อเปิดรับงาน)
+
+  คำนวณระยะทาง (Haversine formula) ใน SQL:
+    SELECT worker_id,
+      (6371 * ACOS(COS(RADIANS(13.7563)) * COS(RADIANS(latitude))
+       * COS(RADIANS(longitude) - RADIANS(100.5018))
+       + SIN(RADIANS(13.7563)) * SIN(RADIANS(latitude)))) AS distance_km
+    FROM worker_locations
+    HAVING distance_km <= service_radius_km
+    ORDER BY distance_km;
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 4: Job Lifecycle (ใหม่) — วงจรชีวิตของงาน
+══════════════════════════════════════════════════════════════════════════════
+
+  ขั้นตอน (flow):
+  [ลูกค้าโพสงาน] → jobs (status=open)
+       ↓ ช่างเห็น → สมัคร
+  [ช่างสมัคร] → job_applications (status=pending) + หักตั๋ว
+       ↓ ลูกค้าเลือก
+  [ลูกค้าเลือกช่าง] → job_applications (status=accepted)
+                     → jobs (status=matched)
+                     → job_matches (status=matched)
+                     → chat_rooms สร้างขึ้น
+       ↓ เริ่มงาน
+  [งานเริ่ม] → job_matches (status=in_progress)
+       ↓ งานเสร็จ
+  [งานเสร็จ] → job_matches (status=completed)
+             → ratings สร้างขึ้น (ลูกค้าให้ดาว)
+             → worker_profiles.rating_avg/rating_count อัพเดท
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: jobs  — ประกาศงาน (โพสหาช่าง)
+└─────────────────────────────────────────────────────────────────────────────
+  id               BIGINT UNSIGNED  PK AUTO_INCREMENT
+  customer_id      BIGINT UNSIGNED  FK → users.id   ผู้โพสงาน
+
+  title            VARCHAR(255)  หัวข้องาน เช่น "ต้องการช่างลง Windows 11"
+  description      TEXT          รายละเอียดงานเต็ม
+
+  job_level        TINYINT UNSIGNED  DEFAULT 1
+                   ระดับความซับซ้อนของงาน กำหนดจำนวนตั๋วที่ช่างต้องใช้:
+                   1 = งานง่าย (1 ตั๋ว) เช่น ลง App, ตัดต้นไม้
+                   2 = งานปานกลาง-ต่ำ (2 ตั๋ว)
+                   3 = งานปานกลาง (3 ตั๋ว) เช่น ล้างแอร์, ลง Windows
+                   4 = งานยาก (4 ตั๋ว) เช่น ซ่อมไฟฟ้า, ต่อท่อน้ำ
+                   5 = งานซับซ้อน (5 ตั๋ว) เช่น งานก่อสร้าง, ต่อเติม
+
+  budget_type      ENUM('fixed','open')  DEFAULT 'open'
+                   fixed = ลูกค้ากำหนดราคาเอง (ดู budget_amount)
+                   open  = ให้ช่างเสนอราคา (budget_amount = NULL)
+
+  budget_amount    DECIMAL(10,2)  ราคาที่ลูกค้ายินดีจ่าย (NULL ถ้า open)
+
+  province_id      SMALLINT UNSIGNED  FK → provinces.id
+  district_id      SMALLINT UNSIGNED  FK → districts.id
+  subdistrict_id   INT UNSIGNED       FK → subdistricts.id
+  latitude         DECIMAL(10,7)      GPS ละติจูด (optional, ใช้ในอนาคต)
+  longitude        DECIMAL(10,7)      GPS ลองจิจูด
+  address_note     VARCHAR(255)       หมายเหตุที่อยู่ เช่น "ห้อง 5B อาคาร A"
+
+  status           ENUM:
+                   open        = รับสมัครช่างอยู่
+                   matched     = ลูกค้าเลือกช่างแล้ว รอเริ่มงาน
+                   in_progress = งานกำลังดำเนินการ
+                   completed   = งานเสร็จสิ้น
+                   expired     = หมดอายุโพส ไม่มีช่างรับ
+                   cancelled   = ลูกค้ายกเลิก
+
+  view_count       INT UNSIGNED  DEFAULT 0    จำนวนครั้งถูกเปิดดู
+  application_count SMALLINT UNSIGNED DEFAULT 0  จำนวนช่างที่สมัคร (อัพเดทพร้อม INSERT job_applications)
+
+  expires_at       DATETIME   วันหมดอายุโพส (สร้างตอน POST = NOW() + 1 DAY)
+                   Cron job ควร run ทุกชั่วโมง:
+                   UPDATE jobs SET status='expired' WHERE status='open' AND expires_at < NOW()
+
+  matched_at       DATETIME   วันที่ job_match สร้างขึ้น
+  completed_at     DATETIME   วันที่งานเสร็จ
+  cancelled_at     DATETIME
+  cancel_reason    VARCHAR(255)
+  created_at / updated_at  DATETIME
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: job_skills  — ทักษะที่งานต้องการ (N-to-N: jobs ↔ skills)
+└─────────────────────────────────────────────────────────────────────────────
+  id       BIGINT UNSIGNED  PK AUTO_INCREMENT
+  job_id   BIGINT UNSIGNED  FK → jobs.id
+  skill_id INT UNSIGNED     FK → skills.id
+  UNIQUE KEY (job_id, skill_id)
+
+  ใช้สำหรับ matching: หาช่างที่มี skill ตรงกับที่งานต้องการ
+  SELECT DISTINCT ws.worker_id FROM worker_skills ws
+  JOIN job_skills js ON js.skill_id = ws.skill_id
+  WHERE js.job_id = ?
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: job_applications  — ช่างสมัครรับงาน
+└─────────────────────────────────────────────────────────────────────────────
+  id             BIGINT UNSIGNED  PK AUTO_INCREMENT
+  job_id         BIGINT UNSIGNED  FK → jobs.id
+  worker_id      BIGINT UNSIGNED  FK → users.id   (ช่างที่สมัคร)
+  UNIQUE KEY (job_id, worker_id)  — สมัครงานเดียวกันได้ครั้งเดียว
+
+  proposed_price DECIMAL(10,2)   ราคาที่ช่างเสนอ (ถ้า budget_type=fixed อาจเท่ากับ budget_amount)
+  message        TEXT            ข้อความแนะนำตัวถึงลูกค้า
+  tickets_used   TINYINT UNSIGNED  จำนวนตั๋วที่ถูกหักไปแล้ว (= job.job_level)
+
+  status         ENUM:
+                 pending   = รอลูกค้าตัดสินใจ
+                 accepted  = ลูกค้าเลือกช่างนี้
+                 rejected  = ลูกค้าเลือกช่างอื่น
+                 withdrawn = ช่างถอนใบสมัครเอง
+
+  applied_at     DATETIME   เวลาที่สมัคร
+  responded_at   DATETIME   เวลาที่ลูกค้าตอบรับ/ปฏิเสธ
+
+  LOGIC สำคัญ: ก่อน INSERT ต้องเช็ค tickets_balance >= job_level
+  หลัง INSERT ต้อง:
+    1. UPDATE worker_profiles SET tickets_balance = tickets_balance - job_level WHERE user_id = ?
+    2. INSERT INTO ticket_transactions (type='application_deduct', amount=-job_level, ...)
+    3. UPDATE jobs SET application_count = application_count + 1 WHERE id = ?
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: job_matches  — การจับคู่ที่สำเร็จแล้ว
+└─────────────────────────────────────────────────────────────────────────────
+  id              BIGINT UNSIGNED  PK AUTO_INCREMENT
+  job_id          BIGINT UNSIGNED  FK → jobs.id
+  customer_id     BIGINT UNSIGNED  FK → users.id
+  worker_id       BIGINT UNSIGNED  FK → users.id
+  application_id  BIGINT UNSIGNED  FK → job_applications.id  (NULL ถ้า direct_hire)
+
+  agreed_price    DECIMAL(10,2)   ราคาที่ตกลงกันจริง
+
+  match_type      ENUM:
+                  from_post   = ลูกค้าเลือกจากรายชื่อผู้สมัคร (ปกติ)
+                  direct_hire = ลูกค้าเลือกช่างโดยตรงจากโปรไฟล์ (ไม่ผ่านโพส)
+
+  status          ENUM:
+                  matched     = จับคู่แล้ว รอนัดวันทำงาน
+                  in_progress = งานกำลังดำเนินการ
+                  completed   = งานเสร็จสิ้น
+                  cancelled   = ยกเลิก
+                  disputed    = มีข้อพิพาท รอ admin ตัดสิน
+
+  scheduled_at    DATETIME   วันนัดทำงาน (ช่างกับลูกค้าตกลงผ่านแชท)
+  started_at      DATETIME   วันเริ่มงานจริง (ช่างกดปุ่ม "เริ่มงาน")
+  completed_at    DATETIME   วันงานเสร็จ (ลูกค้ากดปุ่ม "งานเสร็จแล้ว")
+  cancelled_at    DATETIME
+  cancelled_by    BIGINT UNSIGNED  user_id ที่กดยกเลิก
+  cancel_reason   VARCHAR(255)
+  created_at / updated_at  DATETIME
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 5: Communication (ใหม่)
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: chat_rooms  — ห้องสนทนา
+└─────────────────────────────────────────────────────────────────────────────
+  id              BIGINT UNSIGNED  PK AUTO_INCREMENT
+  match_id        BIGINT UNSIGNED  FK → job_matches.id  (NULL ถ้าเปิดก่อน match)
+  job_id          BIGINT UNSIGNED  FK → jobs.id
+  participant_a   BIGINT UNSIGNED  FK → users.id   (ลูกค้า)
+  participant_b   BIGINT UNSIGNED  FK → users.id   (ช่าง)
+  last_message_at DATETIME   ใช้เรียงรายการแชทใน UI (ล่าสุดขึ้นก่อน)
+  is_locked       TINYINT(1)  DEFAULT 0   1=ปิดแชท (งานยกเลิก/เสร็จแล้วเกิน X วัน)
+  created_at      DATETIME
+
+  ดึงรายการแชทของ user:
+    SELECT cr.*, cm_last.content AS last_message
+    FROM chat_rooms cr
+    LEFT JOIN chat_messages cm_last ON cm_last.id = (
+      SELECT id FROM chat_messages WHERE room_id=cr.id ORDER BY created_at DESC LIMIT 1
+    )
+    WHERE participant_a=? OR participant_b=?
+    ORDER BY last_message_at DESC
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: chat_messages  — ข้อความในแต่ละห้อง
+└─────────────────────────────────────────────────────────────────────────────
+  id            BIGINT UNSIGNED  PK AUTO_INCREMENT
+  room_id       BIGINT UNSIGNED  FK → chat_rooms.id
+  sender_id     BIGINT UNSIGNED  FK → users.id
+
+  message_type  ENUM:
+                text   = ข้อความธรรมดา
+                image  = รูปภาพ (เก็บ URL ใน image_url)
+                system = แจ้งเตือนระบบ เช่น "ลูกค้ายืนยันงานเสร็จแล้ว"
+
+  content       TEXT   เนื้อหาข้อความ (สำหรับ system ใส่ข้อความ system event)
+  image_url     VARCHAR(500)  URL รูปภาพที่อัพโหลด (ถ้า type=image)
+  is_deleted    TINYINT(1)  DEFAULT 0   soft delete (ลบเฉพาะฝั่งตัวเอง)
+  read_at       DATETIME    เวลาที่อีกฝ่ายอ่าน (NULL = ยังไม่อ่าน)
+  expires_at    DATETIME    NOT NULL  วันหมดอายุ = created_at + 1 ปี (PDPA retention)
+  created_at    DATETIME
+
+  Cron job ลบข้อความหมดอายุ:
+    DELETE FROM chat_messages WHERE expires_at < NOW()
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 6: Trust & Quality (ใหม่)
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: ratings  — คะแนนดาวและรีวิว
+└─────────────────────────────────────────────────────────────────────────────
+  id           BIGINT UNSIGNED  PK AUTO_INCREMENT
+  match_id     BIGINT UNSIGNED  FK → job_matches.id
+  from_user_id BIGINT UNSIGNED  FK → users.id   ผู้ให้คะแนน (ลูกค้า)
+  to_user_id   BIGINT UNSIGNED  FK → users.id   ผู้รับคะแนน (ช่าง)
+  UNIQUE KEY (match_id, from_user_id)  — รีวิวงานเดียวกันได้ครั้งเดียว
+
+  stars        TINYINT UNSIGNED  NOT NULL   1–5 ดาว (1=แย่ 5=ดีมาก)
+  review_text  TEXT   ข้อความรีวิว (ไม่บังคับ)
+  is_public    TINYINT(1)  DEFAULT 1   1=แสดงในโปรไฟล์ช่าง
+  created_at   DATETIME
+
+  สำคัญ: ช่างเห็นเฉพาะ rating_avg, ไม่เห็นว่าใครให้ (is_public=1 แต่ไม่แสดง from_user)
+  หลัง INSERT ต้องอัพเดท:
+    UPDATE worker_profiles
+    SET rating_avg = (SELECT AVG(stars) FROM ratings WHERE to_user_id=?),
+        rating_count = (SELECT COUNT(*) FROM ratings WHERE to_user_id=?)
+    WHERE user_id = ?
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: reports  — รายงานปัญหา
+└─────────────────────────────────────────────────────────────────────────────
+  id           BIGINT UNSIGNED  PK AUTO_INCREMENT
+  reporter_id  BIGINT UNSIGNED  FK → users.id
+  target_type  ENUM('user','job','chat_message')
+  target_id    BIGINT UNSIGNED   ID ของสิ่งที่รายงาน (user/job/message)
+
+  reason       ENUM:
+               spam          = สแปม
+               fraud         = หลอกลวง
+               inappropriate = เนื้อหาไม่เหมาะสม
+               fake_profile  = โปรไฟล์ปลอม
+               harassment    = คุกคาม
+               other         = อื่นๆ
+
+  detail       TEXT   รายละเอียดเพิ่มเติม
+  status       ENUM('pending','reviewed','resolved','dismissed')
+  reviewed_by  BIGINT UNSIGNED  user_id ของ admin ที่รีวิว
+  reviewed_at  DATETIME
+  created_at   DATETIME
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 7: Ticket Economy (ใหม่) — ระบบเศรษฐกิจตั๋ว
+══════════════════════════════════════════════════════════════════════════════
+
+  กฎของตั๋ว:
+  • ช่างได้รับตั๋วฟรี 5 ใบต้นเดือน (reset วันที่ 1 ของเดือน ไม่สะสม)
+  • ตั๋วที่ซื้อเพิ่มมีอายุ 90 วัน สะสมได้
+  • ระบบใช้ตั๋วก่อนหลัง: ตั๋วฟรีใช้ก่อน ตั๋วซื้อใช้ทีหลัง
+  • tickets_balance ใน worker_profiles = ยอดรวมปัจจุบัน (ฟรี+ซื้อ)
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: ticket_packages  — แพ็คเกจตั๋วที่วางขาย
+└─────────────────────────────────────────────────────────────────────────────
+  id             INT UNSIGNED  PK AUTO_INCREMENT
+  name           VARCHAR(100)  ชื่อแพ็คเกจ เช่น "แพ็ค 10 ตั๋ว"
+  description    TEXT          รายละเอียด
+  ticket_count   TINYINT UNSIGNED  จำนวนตั๋วที่ได้รับ
+  price          DECIMAL(10,2)     ราคาบาท
+  validity_days  SMALLINT UNSIGNED  DEFAULT 90  อายุตั๋วหลังซื้อ (วัน)
+  is_active      TINYINT(1)  ปิด/เปิดขาย
+  sort_order     SMALLINT UNSIGNED  ลำดับแสดงใน UI
+  created_at / updated_at  DATETIME
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: payments  — ประวัติการชำระเงิน (ซื้อตั๋ว)
+└─────────────────────────────────────────────────────────────────────────────
+  id               BIGINT UNSIGNED  PK AUTO_INCREMENT
+  user_id          BIGINT UNSIGNED  FK → users.id
+  package_id       INT UNSIGNED     FK → ticket_packages.id  (NULL ถ้าชำระแบบอื่น)
+  amount           DECIMAL(10,2)    จำนวนเงินจริงที่ชำระ
+  currency         CHAR(3)  DEFAULT 'THB'
+  payment_method   ENUM('promptpay','credit_card','bank_transfer','other')
+  payment_gateway  VARCHAR(50)      ชื่อ gateway เช่น "omise", "2c2p"
+  gateway_ref      VARCHAR(255)     Transaction ID จาก gateway (ใช้ตรวจสอบย้อนหลัง)
+  status           ENUM('pending','completed','failed','refunded')
+  paid_at          DATETIME         วันที่ชำระสำเร็จ (NULL ถ้ายังไม่สำเร็จ)
+  created_at / updated_at  DATETIME
+
+  Flow: pending → completed (gateway callback) → ค่อย INSERT ticket_transactions
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: ticket_transactions  — ประวัติการรับ/ใช้ตั๋วทั้งหมด
+└─────────────────────────────────────────────────────────────────────────────
+  id              BIGINT UNSIGNED  PK AUTO_INCREMENT
+  worker_id       BIGINT UNSIGNED  FK → users.id
+
+  type            ENUM:
+                  monthly_grant     = ตั๋วฟรีรายเดือน (system auto)
+                  application_deduct = หักเมื่อช่างสมัครงาน
+                  purchase_add      = เพิ่มเมื่อซื้อแพ็คเกจ
+                  admin_adjust      = ปรับโดย admin (เพิ่ม/ลด)
+                  expired_deduct    = หักตั๋วหมดอายุ (Cron job)
+
+  amount          TINYINT  (บวก=ได้รับ, ลบ=ใช้ไป)
+                  เช่น monthly_grant = +5, application_deduct = -1
+
+  balance_after   TINYINT UNSIGNED   ยอดคงเหลือหลังทำรายการ
+                  ใช้ตรวจสอบ audit / debug ได้
+
+  reference_id    BIGINT UNSIGNED   ID อ้างอิง เช่น job_applications.id หรือ payments.id
+  reference_type  VARCHAR(50)       'job_application' | 'payment' | 'admin'
+  note            VARCHAR(255)      หมายเหตุ เช่น "ตั๋วฟรีเดือน พ.ค. 2569"
+  expires_at      DATETIME          วันหมดอายุตั๋วที่ซื้อ (NULL = ตั๋วฟรีไม่มีวันหมด)
+  created_at      DATETIME
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 8: System (ใหม่)
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: notifications  — การแจ้งเตือน In-App / Push
+└─────────────────────────────────────────────────────────────────────────────
+  id          BIGINT UNSIGNED  PK AUTO_INCREMENT
+  user_id     BIGINT UNSIGNED  FK → users.id   ผู้รับแจ้งเตือน
+
+  type        VARCHAR(64)  ประเภท event:
+              new_job_nearby    = มีงานใหม่ในพื้นที่ (สำหรับช่าง)
+              new_application   = มีช่างสมัครงาน (สำหรับลูกค้า)
+              match_accepted    = งานถูกยืนยัน (สำหรับช่าง)
+              new_message       = มีข้อความใหม่
+              rating_received   = ได้รับรีวิว
+              ticket_low        = ตั๋วเหลือน้อย (≤2)
+              job_expired       = โพสงานหมดอายุโดยไม่มีช่างรับ
+
+  title       VARCHAR(255)  หัวข้อแจ้งเตือน (ใช้แสดงบน Push Notification)
+  body        TEXT          เนื้อหา (ใช้แสดงใน In-App)
+  data        JSON          payload เพิ่มเติม เช่น {"job_id":1,"match_id":2}
+                            ใช้สำหรับ deep link ใน app
+
+  is_read     TINYINT(1)  DEFAULT 0   0=ยังไม่อ่าน 1=อ่านแล้ว
+  read_at     DATETIME
+  created_at  DATETIME
+
+  ดึงจำนวนแจ้งเตือนที่ยังไม่อ่าน:
+    SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: consent_logs  — บันทึกการยอมรับเงื่อนไข (PDPA Compliance)
+└─────────────────────────────────────────────────────────────────────────────
+  id                BIGINT UNSIGNED  PK AUTO_INCREMENT
+  user_id           BIGINT UNSIGNED  FK → users.id
+
+  document_type     ENUM:
+                    terms          = ข้อกำหนดและเงื่อนไข (T&C)
+                    privacy_policy = นโยบายความเป็นส่วนตัว
+                    cookie         = Cookie Consent
+
+  document_version  VARCHAR(20)  DEFAULT '1.0'
+                    เวอร์ชันเอกสาร เมื่ออัพเดทเอกสาร ต้องขอ consent ใหม่
+
+  accepted          TINYINT(1)  DEFAULT 1   1=ยอมรับ 0=ปฏิเสธ
+  ip                VARCHAR(45)  IP ที่กดยอมรับ
+  user_agent        VARCHAR(255)  App/Browser
+  created_at        DATETIME
+
+  สำคัญมาก (PDPA):
+  - เก็บทุกครั้งที่ user กดยอมรับ ห้ามลบ
+  - เมื่ออัพเดท T&C ต้อง INSERT row ใหม่ ไม่ UPDATE
+  - สามารถ query ได้ว่า user ยอมรับ version ล่าสุดหรือยัง
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: audit_log  — บันทึกกิจกรรมระบบ (มีอยู่แล้ว)
+└─────────────────────────────────────────────────────────────────────────────
+  id         BIGINT UNSIGNED  PK
+  user_id    BIGINT UNSIGNED  FK → users.id  (NULL ได้ กรณี guest)
+  action     VARCHAR(64)      ชื่อ event เช่น login, logout, update_profile,
+                              delete_account, view_kyc, approve_kyc
+  ip         VARCHAR(45)
+  user_agent VARCHAR(255)
+  metadata   JSON             ข้อมูลเพิ่มเติม เช่น ค่าก่อน/หลังเปลี่ยน
+  created_at DATETIME
+
+
+══════════════════════════════════════════════════════════════════════════════
+ กลุ่มที่ 9: DB2 (Secure) — ควรอยู่บน Server แยก
+══════════════════════════════════════════════════════════════════════════════
+
+  ข้อมูลในกลุ่มนี้เป็น "sensitive data" ตาม PDPA
+  ต้องแยกออกจาก DB1 เพื่อความปลอดภัย
+  การเข้าถึงทุกครั้งต้องบันทึกใน sensitive_access_logs
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: kyc_submissions  — เอกสารยืนยันตัวตน (DB2)
+└─────────────────────────────────────────────────────────────────────────────
+  id                      BIGINT UNSIGNED  PK AUTO_INCREMENT
+  user_id                 BIGINT UNSIGNED  NOT NULL  (อ้างอิง users.id จาก DB1)
+  id_card_number_encrypted VARCHAR(500)   เลขบัตร ปชช. เข้ารหัส AES-256
+  id_card_photo_path      VARCHAR(500)    path ไฟล์รูปบัตร (AES-256 encrypted file)
+  selfie_path             VARCHAR(500)    path ไฟล์รูปถ่ายคู่บัตร
+
+  status                  ENUM('pending','approved','rejected')  DEFAULT 'pending'
+  reject_reason           VARCHAR(255)    เหตุผลที่ reject
+  reviewed_by             BIGINT UNSIGNED user_id ของ admin ที่ตรวจสอบ
+  reviewed_at             DATETIME
+  submitted_at            DATETIME        NOT NULL  DEFAULT CURRENT_TIMESTAMP
+
+  NOTE: ลบหลังจาก 1 ปี หลังปิดบัญชีหรือถูกแบน (ตาม Privacy Policy)
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: blacklist  — บัญชีถูกแบน ป้องกันสมัครซ้ำ (DB2)
+└─────────────────────────────────────────────────────────────────────────────
+  id               BIGINT UNSIGNED  PK AUTO_INCREMENT
+  identifier_hash  CHAR(64)  SHA-256 hash ของเบอร์โทรหรืออีเมล
+                   (ไม่เก็บข้อมูลดิบ เพราะ PDPA)
+  identifier_type  ENUM('phone','email','device_id')
+  user_id          BIGINT UNSIGNED  อ้างอิง (NULL ได้ ถ้าบัญชีถูกลบแล้ว)
+  reason           VARCHAR(255)     เหตุผลที่แบน
+  banned_by        BIGINT UNSIGNED  user_id ของ admin
+  banned_at        DATETIME         NOT NULL  DEFAULT CURRENT_TIMESTAMP
+  expires_at       DATETIME         NULL = แบนถาวร, มีค่า = แบนชั่วคราว
+
+  การเช็ค: SELECT * FROM blacklist
+           WHERE identifier_hash = SHA2(?, 256)
+           AND (expires_at IS NULL OR expires_at > NOW())
+
+
+┌─────────────────────────────────────────────────────────────────────────────
+│ TABLE: sensitive_access_logs  — log การเข้าถึงข้อมูล sensitive (DB2)
+└─────────────────────────────────────────────────────────────────────────────
+  id             BIGINT UNSIGNED  PK AUTO_INCREMENT
+  accessed_by    BIGINT UNSIGNED  user_id ของคนที่เข้าถึง (admin)
+  resource_type  VARCHAR(64)      'kyc_submission' | 'blacklist' | 'id_card_file'
+  resource_id    BIGINT UNSIGNED  ID ของ resource
+  action         VARCHAR(64)      'view' | 'download' | 'approve' | 'reject' | 'delete'
+  ip             VARCHAR(45)
+  user_agent     VARCHAR(255)
+  created_at     DATETIME  NOT NULL  DEFAULT CURRENT_TIMESTAMP
+
+  บันทึกทุกครั้งที่มีการเข้าถึงข้อมูล sensitive (ข้อกำหนด PDPA)
+  ห้ามลบ — เก็บตลอดกาล
+
+
+══════════════════════════════════════════════════════════════════════════════
+ สรุปความสัมพันธ์ทั้งหมด (ER Summary)
+══════════════════════════════════════════════════════════════════════════════
+
+  users ──────────────── (1:1) ──── worker_profiles
+  users ──────────────── (1:N) ──── otp_codes
+  users ──────────────── (1:N) ──── refresh_tokens
+  users ──────────────── (1:N) ──── audit_log
+  users ──────────────── (1:N) ──── notifications
+  users ──────────────── (1:N) ──── consent_logs
+  users ──────────────── (1:N) ──── reports (as reporter)
+  users ──────────────── (1:N) ──── jobs (as customer)
+  users ──────────────── (1:N) ──── job_applications (as worker)
+  users ──────────────── (1:N) ──── job_matches (as customer or worker)
+  users ──────────────── (1:N) ──── ratings (as giver or receiver)
+  users ──────────────── (1:N) ──── payments
+  users ──────────────── (1:N) ──── ticket_transactions
+
+  worker_profiles ────── (1:N) ──── worker_skills
+  worker_profiles ────── (1:N) ──── worker_service_areas
+  worker_profiles ────── (1:1) ──── worker_locations
+
+  skill_categories ───── (1:N) ──── skills
+  skills ──────────────── (N:M) ─── workers  (via worker_skills)
+  skills ──────────────── (N:M) ─── jobs     (via job_skills)
+
+  provinces ──────────── (1:N) ──── districts
+  districts ──────────── (1:N) ──── subdistricts
+
+  jobs ───────────────── (1:N) ──── job_applications
+  jobs ───────────────── (1:N) ──── job_skills
+  jobs ───────────────── (1:1) ──── job_matches  (เมื่อ matched)
+
+  job_matches ─────────── (1:1) ─── chat_rooms
+  job_matches ─────────── (1:1) ─── ratings
+
+  chat_rooms ──────────── (1:N) ─── chat_messages
+
+  ticket_packages ─────── (1:N) ─── payments
+
+
+══════════════════════════════════════════════════════════════════════════════
+ API Endpoints ที่ควรมี (แนะนำสำหรับ Backend Dev)
+══════════════════════════════════════════════════════════════════════════════
+
+  [Auth]
+  POST   /auth/register          สมัครสมาชิก (phone OTP)
+  POST   /auth/verify-otp        ยืนยัน OTP
+  POST   /auth/login             login
+  POST   /auth/refresh           refresh access token
+  POST   /auth/logout            revoke refresh token
+  POST   /auth/forgot-password   ขอ OTP รีเซ็ตรหัสผ่าน
+
+  [Worker]
+  GET    /workers                 ค้นหาช่าง (filter: skill, province, level, rating)
+  GET    /workers/:id             ดูโปรไฟล์ช่าง
+  PUT    /workers/me/skills       อัพเดทรายการทักษะ
+  PUT    /workers/me/areas        อัพเดทพื้นที่บริการ
+  PUT    /workers/me/location     อัพเดทพิกัด GPS
+
+  [Jobs]
+  POST   /jobs                    โพสงานใหม่ (customer)
+  GET    /jobs                    ดูงานที่ตรงกัน (worker) หรือโพสของตัวเอง (customer)
+  GET    /jobs/:id                ดูรายละเอียดงาน
+  DELETE /jobs/:id                ลบโพสงาน (ก่อน matched เท่านั้น)
+  POST   /jobs/:id/apply          ช่างสมัครงาน (ตรวจตั๋วก่อน)
+  POST   /jobs/:id/select/:appId  ลูกค้าเลือกช่าง
+  PATCH  /jobs/:id/status         อัพเดทสถานะงาน (start/complete/cancel)
+
+  [Chat]
+  GET    /chats                   รายการห้องแชทของ user
+  GET    /chats/:roomId/messages  ดึงข้อความ (pagination)
+  POST   /chats/:roomId/messages  ส่งข้อความ
+  PATCH  /chats/:roomId/read      mark as read
+
+  [Ratings]
+  POST   /matches/:id/rate        ให้คะแนน (หลัง completed)
+
+  [Tickets]
+  GET    /tickets/balance         ดูยอดตั๋ว
+  GET    /tickets/packages        ดูแพ็คเกจที่วางขาย
+  POST   /tickets/purchase        ซื้อตั๋ว
+
+  [Notifications]
+  GET    /notifications           ดูการแจ้งเตือน
+  PATCH  /notifications/read-all  mark all as read
+
+  [Admin]
+  GET    /admin/users             จัดการ users
+  GET    /admin/jobs              จัดการโพสงาน
+  GET    /admin/reports           ดูรายงาน
+  POST   /admin/blacklist         แบน user
+  GET    /admin/kyc               รายการ KYC รอตรวจสอบ
+  PATCH  /admin/kyc/:id/approve   อนุมัติ KYC
+  PATCH  /admin/kyc/:id/reject    ปฏิเสธ KYC
+
+
+══════════════════════════════════════════════════════════════════════════════
+ Cron Jobs ที่ต้องตั้งค่า
+══════════════════════════════════════════════════════════════════════════════
+
+  ทุกชั่วโมง:
+    UPDATE jobs SET status='expired' WHERE status='open' AND expires_at < NOW()
+    -- แจ้งเตือน customer ที่โพสหมดอายุโดยไม่มีช่างรับ
+
+  วันที่ 1 ของทุกเดือน (00:00):
+    INSERT INTO ticket_transactions (worker_id, type, amount, balance_after, note)
+    SELECT user_id, 'monthly_grant', 5, 5, 'ตั๋วฟรีประจำเดือน'
+    FROM worker_profiles WHERE ...
+    -- แล้ว reset tickets_balance = 5 (ไม่สะสม)
+
+  ทุกวัน (02:00):
+    DELETE FROM chat_messages WHERE expires_at < NOW()  -- PDPA 1 ปี
+    DELETE FROM otp_codes WHERE expires_at < DATE_SUB(NOW(), INTERVAL 7 DAY)
+
+  ทุกสัปดาห์:
+    UPDATE tickets ที่ซื้อและหมดอายุแล้ว:
+    INSERT expired_deduct records + ลด tickets_balance
+
+
+══════════════════════════════════════════════════════════════════════════════
+ ตัวอย่างข้อมูล (Sample Data ที่ Insert ไว้แล้ว)
+══════════════════════════════════════════════════════════════════════════════
+
+  users:
+    ID 9001 — นายอนุชา วงศ์ไพโรจน์  (worker, ช่างคอมพิวเตอร์)
+    ID 9002 — นางสาวมาลี สุขสันต์    (customer)
+
+  สถานการณ์จำลอง:
+    - มาลีโพสงาน "ต้องการช่างลง Windows 11" (job #1, level 1)
+    - อนุชาสมัครรับงาน ราคา 200 บาท (app #1, ใช้ 1 ตั๋ว)
+    - มาลีเลือกอนุชา → เกิด match #1
+    - ทั้งสองแชทกัน 2 ข้อความ
+    - งานเสร็จ → มาลีให้ 5 ดาว
+    - อนุชามีตั๋วเหลือ 4 ใบ (ได้มา 5 หัวเดือน หักไป 1 ใบ)
+
+══════════════════════════════════════════════════════════════════════════════

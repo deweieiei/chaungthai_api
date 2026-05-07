@@ -1,0 +1,504 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           ChaungThai API — คู่มือสำหรับ Developer                          ║
+║           Base URL: http://110.171.128.44:9543                              ║
+║           เวอร์ชัน 1.0 | พฤษภาคม 2569                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ GENERAL RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Content-Type:  application/json
+  Encoding:      UTF-8
+
+  Response format (ทุก endpoint):
+    { "ok": true,  "data": {...} }         ← สำเร็จ
+    { "ok": false, "error": { "code": "...", "message": "..." } }  ← ผิดพลาด
+
+  Authentication:
+    ทุก endpoint ที่ต้องการ auth ให้ใส่ header:
+    Authorization: Bearer <accessToken>
+
+  Token lifetime:
+    accessToken  = 15 นาที (ต้อง refresh เมื่อหมดอายุ)
+    refreshToken = 30 วัน
+
+  Pagination:
+    ?page=1&limit=20  (default: page=1, limit=20)
+    response จะมี { data: [], page, limit }
+
+  Error codes ที่พบบ่อย:
+    validation_error     - body/query ไม่ถูกต้อง
+    invalid_credentials  - email/password ผิด
+    missing_token        - ไม่ได้ส่ง Authorization header
+    token_expired        - access token หมดอายุ
+    forbidden            - role ไม่มีสิทธิ์
+    not_found            - ไม่พบข้อมูล
+    conflict             - ข้อมูลซ้ำ (เช่น email ซ้ำ)
+    insufficient_tickets - ตั๋วไม่พอ
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 1. AUTH  /api/auth
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+POST /api/auth/register
+  Body: {
+    firstName, lastName, email, phone, password, passwordConfirm,
+    role: "customer" | "worker",  (default: customer)
+    acceptTerms: true,
+    newsletter: false  (optional)
+  }
+  Response 201: { ok, user, accessToken, refreshToken, expiresIn }
+  Errors: user_exists (409), validation_error (400)
+  Rate limit: 5 ครั้ง/ชั่วโมง
+
+POST /api/auth/login
+  Body: { identifier: "email_or_phone", password, remember: false }
+  Response: { ok, user, accessToken, refreshToken, expiresIn }
+  Errors: invalid_credentials (401), account_locked (429)
+  Rate limit: 10 ครั้ง/15 นาที
+
+POST /api/auth/refresh
+  Body: { refreshToken }
+  Response: { ok, accessToken, refreshToken, expiresIn }
+  Note: Token rotation — refreshToken เก่าจะถูก revoke ทันที
+
+POST /api/auth/logout
+  Body: { refreshToken }  (optional แต่ควรส่ง)
+  Response: { ok: true }
+
+GET /api/auth/me  [Auth]
+  Response: { ok, user: { id, email, phone, firstName, lastName, role, ... } }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 2. USERS  /api/users  [Auth required for all]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/users/me
+  Response: { ok, user: { ...userData, workerProfile: {...} | null } }
+
+PATCH /api/users/me
+  Body: { firstName?, lastName?, newsletterOptIn?: boolean }
+  Response: { ok, user }
+
+PATCH /api/users/me/password
+  Body: { currentPassword, newPassword }
+  Response: { ok, message }
+  Note: revoke all refresh tokens ทันที → ต้อง login ใหม่ทุก device
+
+DELETE /api/users/me
+  Response: { ok, message }
+  Note: soft delete — is_active = 0, ข้อมูลลบจริงหลัง 90 วัน (PDPA)
+
+GET /api/users/me/consent
+  Response: { ok, data: [{ document_type, document_version, accepted, created_at }] }
+
+POST /api/users/me/consent
+  Body: { documentType: "terms"|"privacy_policy"|"cookie", documentVersion, accepted }
+  Response 201: { ok }
+
+POST /api/users/me/device-token  ← สำหรับ Push Notification
+  Body: { token, platform: "fcm"|"apns"|"web", deviceName? }
+  Response 201: { ok }
+
+DELETE /api/users/me/device-token
+  Body: { token }
+  Response: { ok }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 3. SKILLS  /api/skills  [Public]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/skills/categories
+  Response: { ok, data: [{ id, name_th, name_en, icon_url, sort_order }] }
+
+GET /api/skills?categoryId=1
+  Query: categoryId (optional)
+  Response: { ok, data: [{ id, category_id, name_th, category_name_th }] }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 4. LOCATIONS  /api/locations  [Public]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/locations/provinces
+  Response: { ok, data: [{ id, name_th, name_en }] }
+
+GET /api/locations/districts?provinceId=1
+  Response: { ok, data: [{ id, province_id, name_th }] }
+
+GET /api/locations/subdistricts?districtId=1
+  Response: { ok, data: [{ id, district_id, name_th, postal_code }] }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 5. WORKERS  /api/workers
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/workers  [Public — ค้นหาช่าง]
+  Query: skillId, provinceId, districtId, level(1-5), ratingMin, priceMax, q, page, limit
+  Response: { ok, data: [{ id, firstName, lastName, bio, avatarUrl, ratingAvg,
+                            ratingCount, isVerified, skills: [...] }] }
+
+GET /api/workers/:id  [Public — โปรไฟล์ช่าง]
+  Response: { ok, data: { ...worker, skills, areas, recentRatings } }
+
+PUT /api/workers/me/profile  [Auth — worker only]
+  Body: { bio?, avatarUrl? }
+  Response: { ok, data: workerProfile }
+
+PUT /api/workers/me/skills  [Auth — worker only]
+  Body: { skills: [{ skillId, skillLevel(1-5), priceType("fixed"|"per_hour"|"negotiable"),
+                     price, description? }] }
+  Note: แทนที่ทั้งหมด ไม่ใช่ merge
+  Response: { ok, data: [...skills] }
+
+PUT /api/workers/me/areas  [Auth — worker only]
+  Body: { areas: [{ provinceId, districtId?, subdistrictId? }] }
+  Note: แทนที่ทั้งหมด ไม่ใช่ merge
+  Response: { ok, message }
+
+PUT /api/workers/me/location  [Auth — worker only]
+  Body: { latitude, longitude, serviceRadiusKm? }
+  Response: { ok, message }
+
+GET /api/workers/me/stats  [Auth — worker only]
+  Response: { ok, data: { completedJobs, activeJobs, cancelledJobs, ratingAvg,
+                          ratingCount, ticketsBalance, isVerified } }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 6. JOBS  /api/jobs  [Auth required]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+POST /api/jobs  [customer only]
+  Body: {
+    title, description,
+    jobLevel: 1-5,        ← กำหนดจำนวนตั๋วที่ช่างต้องใช้
+    budgetType: "fixed"|"open",
+    budgetAmount: null,   ← ต้องระบุถ้า budgetType="fixed"
+    provinceId, districtId?, subdistrictId?,
+    latitude?, longitude?,
+    addressNote?,
+    skillIds: [1, 2]      ← ทักษะที่ต้องการ (อย่างน้อย 1 อย่าง)
+  }
+  Response 201: { ok, data: job }
+  Note: expires_at = สร้าง + 1 วันอัตโนมัติ
+
+GET /api/jobs  [Auth]
+  Query: status?, provinceId?, skillId?, level?, budgetMax?, q?, page, limit
+  หมายเหตุ:
+    - customer เห็นเฉพาะงานของตัวเอง
+    - worker เห็น feed งาน = งาน status=open ที่ตรง skills + areas ของตัวเอง
+
+GET /api/jobs/:id  [Auth]
+  Response: { ok, data: { ...job, skills, myApplication } }
+  myApplication: null หรือ { id, status, proposedPrice }  (สำหรับ worker)
+
+PATCH /api/jobs/:id  [customer only, status=open เท่านั้น]
+  Body: { title?, description?, budgetType?, budgetAmount?, addressNote? }
+  Response: { ok, data: job }
+
+DELETE /api/jobs/:id  [customer only, status=open เท่านั้น]
+  Response: { ok, message }  ← เปลี่ยน status เป็น cancelled
+
+GET /api/jobs/:id/applications  [Auth]
+  customer: เห็นทุกใบสมัคร + ข้อมูลช่าง
+  worker: เห็นเฉพาะใบสมัครของตัวเอง
+  Response: { ok, data: [...applications] }
+
+POST /api/jobs/:id/apply  [worker only]
+  Body: { proposedPrice, message? }
+  Response 201: { ok, message, ticketsUsed, ticketsRemaining }
+  Errors: insufficient_tickets, already_applied, job_closed, not_verified (ระดับ 3+)
+
+DELETE /api/jobs/:id/apply  [worker only — ถอนใบสมัคร]
+  Response: { ok, message, ticketsReturned }
+  Note: คืนตั๋วให้อัตโนมัติ
+
+POST /api/jobs/:id/select/:appId  [customer only]
+  Response 201: { ok, message, matchId }
+  Note:
+    - ใบสมัครที่เลือก → accepted
+    - ใบสมัครที่เหลือ → rejected
+    - job.status → matched
+    - job_matches สร้างขึ้น
+    - chat_rooms สร้างขึ้นอัตโนมัติ
+    - ช่างได้รับ notification ทันที
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 7. MATCHES  /api/matches  [Auth required]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/matches  [customer + worker]
+  Query: status?, page, limit
+  Response: { ok, data: [{ ...match, jobTitle, customerName, workerName,
+                            workerAvatar, chatRoomId }] }
+
+GET /api/matches/:id
+  Response: { ok, data: { ...match, job details, customer/worker info, chatRoomId } }
+  Note: เฉพาะคู่สัญญา (customer + worker) เท่านั้น
+
+PATCH /api/matches/:id/start  [worker only — status: matched → in_progress]
+  Response: { ok, message }
+
+PATCH /api/matches/:id/complete  [customer only — status: matched/in_progress → completed]
+  Response: { ok, message }
+  Note: ลูกค้าจะถูก prompt ให้ให้คะแนนหลังจากนี้
+
+PATCH /api/matches/:id/cancel  [customer + worker]
+  Body: { reason }  (required, min 5 chars)
+  Response: { ok, message }
+  Note: อีกฝ่ายได้รับ notification ทันที
+
+POST /api/matches/direct  [customer only — จ้างช่างโดยตรงโดยไม่ผ่านโพสงาน]
+  Body: {
+    workerId, skillId, title, description, agreedPrice,
+    provinceId, districtId?, addressNote?,
+    scheduledAt?  (ISO 8601 datetime)
+  }
+  Response 201: { ok, message, matchId, jobId }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 8. CHAT  /api/chat  [Auth required]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/chat
+  Response: { ok, data: [{ id, jobTitle, otherUserId, otherFirstName,
+                            otherAvatar, lastMessage, unreadCount, lastMessageAt }] }
+  Note: เรียงตาม last_message_at DESC (ห้องแชทล่าสุดขึ้นก่อน)
+
+GET /api/chat/:roomId?before=<msgId>&limit=50
+  Response: { ok, data: [...messages], roomId }
+  Note:
+    - messages เรียงจากเก่าไปใหม่ (ASC)
+    - ใช้ before=<id> สำหรับ infinite scroll โหลดข้อความเก่ากว่า
+    - mark ข้อความอีกฝ่ายว่า read อัตโนมัติ
+
+POST /api/chat/:roomId
+  Body: { content, messageType: "text"|"image", imageUrl? }
+  Response 201: { ok, data: message }
+  Note: อีกฝ่ายได้รับ notification ทันที
+
+PATCH /api/chat/:roomId/read
+  Response: { ok }
+  Note: mark ทุก unread message จากอีกฝ่ายว่า read
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 9. RATINGS  /api/ratings
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/ratings/worker/:workerId  [Public]
+  Query: page, limit
+  Response: { ok, data: [...ratings], summary: { ratingAvg, ratingCount } }
+
+POST /api/ratings  [customer only — หลังงาน completed]
+  Body: { matchId, stars: 1-5, reviewText? }
+  Response 201: { ok, message }
+  Errors: not_completed, already_rated, match_not_found
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 10. TICKETS  /api/tickets  [Auth required]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/tickets  [worker only]
+  Response: { ok, balance, isVerified, transactions: [...30 รายการล่าสุด] }
+
+GET /api/tickets/packages  [Auth — all roles]
+  Response: { ok, data: [{ id, name, ticketCount, price, validityDays }] }
+
+GET /api/tickets/payments  [Auth]
+  Response: { ok, data: [...50 รายการล่าสุด] }
+
+POST /api/tickets/purchase  [worker only]
+  Body: { packageId, paymentMethod: "promptpay"|"credit_card"|"bank_transfer"|"other" }
+  Response 201 (DEV sandbox): { ok, message, paymentId, ticketsAdded }
+  Response 201 (PROD): { ok, paymentId, amount } ← ให้ frontend redirect ไป gateway
+
+POST /api/tickets/webhook  [Payment gateway callback]
+  Body: { paymentId, status: "completed"|"failed", gatewayRef? }
+  Response: { ok }
+  Note: Idempotent — ส่งซ้ำได้ไม่มีผลเพิ่ม
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 11. NOTIFICATIONS  /api/notifications  [Auth required]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/notifications?unreadOnly=true&page=1&limit=30
+  Response: { ok, data: [...], total, unread, page, limit }
+
+PATCH /api/notifications/read-all
+  Response: { ok }
+
+PATCH /api/notifications/:id/read
+  Response: { ok }
+
+DELETE /api/notifications/:id
+  Response: { ok }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 12. ADMIN  /api/admin  [Auth + role=admin required]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/admin/stats
+  Response: { ok, data: { users, jobs, matches, reports } }
+
+GET /api/admin/users?role=worker&active=1&q=name&page=1
+  Response: { ok, data: [...users] }
+
+PATCH /api/admin/users/:id/status
+  Body: { isActive: true|false, reason? }
+  Response: { ok }
+
+PATCH /api/admin/users/:id/adjust-tickets
+  Body: { amount: -5 ถึง +100, reason }
+  Response: { ok, newBalance }
+
+GET /api/admin/jobs?status=open
+  Response: { ok, data: [...jobs with customer info] }
+
+GET /api/admin/reports?status=pending
+  Response: { ok, data: [...reports] }
+
+PATCH /api/admin/reports/:id
+  Body: { status: "reviewed"|"resolved"|"dismissed", note? }
+  Response: { ok }
+
+GET /api/admin/audit?userId=123&page=1
+  Response: { ok, data: [...audit_log] }
+
+POST /api/admin/blacklist
+  Body: { identifier, type: "phone"|"email"|"device_id", reason, expiresAt? }
+  Response 201: { ok }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 13. HEALTH  /api/health  [Public]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/health
+  Response: { ok, status: "ok", db: "connected"|"error", uptime, timestamp }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FLOW ตัวอย่าง: ลูกค้าโพสงาน → ช่างสมัคร → match → แชท → จบงาน
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [Customer App]
+  1. POST /api/auth/login           → get accessToken
+  2. POST /api/jobs                 → สร้างโพสงาน (expires +1 วัน)
+  3. GET  /api/jobs/:id/applications→ ดูรายชื่อช่างที่สมัคร
+  4. POST /api/jobs/:id/select/:appId → เลือกช่าง (match สร้างอัตโนมัติ)
+  5. GET  /api/chat                 → เห็นห้องแชทใหม่
+  6. POST /api/chat/:roomId         → แชทกับช่าง
+  7. PATCH /api/matches/:id/complete→ ยืนยันงานเสร็จ
+  8. POST /api/ratings              → ให้ดาวช่าง
+
+  [Worker App]
+  1. POST /api/auth/login           → get accessToken
+  2. PUT  /api/workers/me/skills    → ตั้งทักษะ + ราคา
+  3. PUT  /api/workers/me/areas     → ตั้งพื้นที่บริการ
+  4. GET  /api/jobs                 → ดู feed งานที่ตรงกัน
+  5. GET  /api/jobs/:id             → ดูรายละเอียดงาน
+  6. POST /api/jobs/:id/apply       → สมัครงาน (หักตั๋ว)
+  7. GET  /api/notifications        → รอแจ้งเตือนว่าถูกเลือก
+  8. GET  /api/chat                 → แชทกับลูกค้า
+  9. PATCH /api/matches/:id/start   → กดเริ่มงาน
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FLOW ตัวอย่าง: ลูกค้าเลือกช่างโดยตรง (Direct Hire)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. GET  /api/workers?skillId=1&provinceId=1  → ค้นหาช่าง
+  2. GET  /api/workers/:id                      → ดูโปรไฟล์ช่าง
+  3. POST /api/matches/direct                   → ส่งงานตรงไปที่ช่าง
+  4. GET  /api/chat                             → แชทได้เลย
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ โครงสร้างไฟล์ Project
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  chaungthai_api/
+  ├── server.js                    ← entry point
+  ├── .env                         ← config (ห้าม commit)
+  ├── package.json
+  ├── src/
+  │   ├── config.js                ← อ่าน env vars
+  │   ├── db.js                    ← MySQL connection pool
+  │   ├── middleware/
+  │   │   ├── auth.js              ← requireAuth, requireRole
+  │   │   ├── error.js             ← central error handler
+  │   │   └── validate.js          ← Zod schema validation
+  │   ├── utils/
+  │   │   ├── http.js              ← HttpError class, asyncHandler
+  │   │   ├── tokens.js            ← JWT sign/verify, sha256, randomCode
+  │   │   └── notify.js            ← createNotification helper
+  │   └── routes/
+  │       ├── health.js            → GET /api/health
+  │       ├── auth.js              → /api/auth/*
+  │       ├── users.js             → /api/users/*
+  │       ├── skills.js            → /api/skills/*
+  │       ├── locations.js         → /api/locations/*
+  │       ├── workers.js           → /api/workers/*
+  │       ├── jobs.js              → /api/jobs/*
+  │       ├── matches.js           → /api/matches/*
+  │       ├── chat.js              → /api/chat/*
+  │       ├── ratings.js           → /api/ratings/*
+  │       ├── tickets.js           → /api/tickets/*
+  │       ├── notifications.js     → /api/notifications/*
+  │       └── admin.js             → /api/admin/*
+  ├── scripts/
+  │   ├── test-connection.js       ← ทดสอบ DB
+  │   ├── migrate.js               ← รัน SQL migration
+  │   └── add_device_tokens.js     ← เพิ่มตาราง device_tokens, job_views
+  └── sql/
+      └── 001_init.sql             ← schema เริ่มต้น
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ วิธีรัน Server
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Development (auto-reload):
+    npm run dev
+    หรือ: node --watch server.js
+
+  Production (PM2):
+    npm run pm2:start
+
+  Test DB connection:
+    npm run db:test
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Security Notes
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  - JWT secret ต้อง 64+ random bytes — ห้ามใช้ secret ใน .env.example
+  - bcrypt rounds = 12 (อย่าลด)
+  - rate limit: register 5/hr, login 10/15min
+  - refresh token rotation: ทุกครั้งที่ refresh จะ revoke token เก่า
+  - account lockout: กรอกรหัสผิด 5 ครั้ง/15 นาที ล็อก 15 นาที
+  - ทุก endpoint ที่ sensitive มี audit_log
+  - chat message expires_at = +1 ปี (PDPA data retention)
+  - ตั๋ว: ตรวจ balance ก่อนเสมอ + atomic transaction กับ ticket_transactions
+
+  TODO สำหรับ Production:
+  [ ] เปลี่ยน JWT_SECRET ใหม่ทั้งหมด
+  [ ] ตั้ง CORS_ORIGINS ให้ตรงกับ domain จริง
+  [ ] ต่อ Payment Gateway จริง (Omise/2C2P) ใน tickets.js
+  [ ] ตั้ง Cron jobs (expire jobs, reset monthly tickets, delete old chat)
+  [ ] ใส่ FCM/APNs ใน notify.js สำหรับ Push Notification จริง
+  [ ] ตั้ง HTTPS + SSL (Nginx)
+  [ ] Load Thai address DB สมบูรณ์ (77 จังหวัด + ทุก อำเภอ/แขวง)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
