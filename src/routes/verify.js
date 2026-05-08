@@ -8,7 +8,7 @@
  */
 
 const express    = require('express');
-const rateLimit  = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { z }      = require('zod');
 const db         = require('../db');
 const { errors, asyncHandler } = require('../utils/http');
@@ -29,7 +29,7 @@ const OTP_RESEND_WAIT_SEC = 60;  // รอ 60 วินาทีก่อนส�
 const otpSendLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
     max: 5,
-    keyGenerator: (req) => `${req.ip}-${req.user?.id}`,
+    keyGenerator: (req) => `${ipKeyGenerator(req.ip)}-${req.user?.id}`,
     message: { ok: false, error: { code: 'too_many_requests', message: 'ส่ง OTP บ่อยเกินไป กรุณารอ 1 ชั่วโมง' } },
 });
 
