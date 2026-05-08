@@ -90,4 +90,58 @@ router.post(
   })
 );
 
+// GET /api/ratings/customer/:customerId  — ประวัติการรีวิวของลูกค้า (ช่างดูได้)
+// แสดงรีวิวที่ลูกค้าคนนี้เคยให้กับช่างต่างๆ (เพื่อดูว่าลูกค้าดุหรือใจดี)
+router.get('/customer/:customerId', asyncHandler(async (req, res) => {
+  const customerId = parseInt(req.params.customerId, 10);
+  const page  = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, parseInt(req.query.limit, 10) || 20);
+
+  // ตรวจว่า customer มีอยู่จริง
+  const customer = await db.queryOne(
+    `SELECT id, first_name, last_name FROM users WHERE id = :id AND role = 'customer'`,
+    { id: customerId }
+  );
+  if (!customer) throw errors.notFound('customer_not_found', 'ไม่พบผู้ว่าจ้างรายนี้');
+
+  // รีวิวที่ลูกค้าคนนี้ให้ (from_user_id = customerId) เฉพาะที่ public
+  const reviews = await db.query(
+    `SELECT r.stars, r.review_text, r.created_at,
+            jm.agreed_price,
+            j.title AS job_title, j.job_level,
+            uw.first_name AS worker_first_name, uw.last_name AS worker_last_name
+     FROM ratings r
+     JOIN job_matches jm ON jm.id = r.match_id
+     JOIN jobs j         ON j.id  = jm.job_id
+     JOIN users uw       ON uw.id = jm.worker_id
+     WHERE r.from_user_id = :cid AND r.is_public = 1
+     ORDER BY r.created_at DESC
+     LIMIT :limit OFFSET :offset`,
+    { cid: customerId, limit, offset: (page - 1) * limit }
+  );
+
+  // สรุปสถิติ: ให้คะแนนเฉลี่ยเท่าไหร่ → บอกว่าลูกค้าคนนี้ใจดีแค่ไหน
+  const summary = await db.queryOne(
+    `SELECT
+       COUNT(*)           AS total_reviews,
+       ROUND(AVG(stars), 2) AS avg_stars_given,
+       SUM(stars = 5)     AS stars_5,
+       SUM(stars = 4)     AS stars_4,
+       SUM(stars = 3)     AS stars_3,
+       SUM(stars <= 2)    AS stars_low
+     FROM ratings
+     WHERE from_user_id = :cid AND is_public = 1`,
+    { cid: customerId }
+  );
+
+  res.json({
+    ok: true,
+    customer: { id: customer.id, firstName: customer.first_name, lastName: customer.last_name },
+    summary,
+    data: reviews,
+    page,
+    limit,
+  });
+}));
+
 module.exports = router;

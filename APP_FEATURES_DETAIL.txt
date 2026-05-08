@@ -1,0 +1,1811 @@
+================================================================================
+  ChaungThai — คู่มือ Feature รายละเอียด สำหรับนักพัฒนา
+  อัพเดต: 2026-05-08  (ฉบับ 2 — เพิ่ม 8 Feature ใหม่ 🆕)
+  ครอบคลุม 2 แอพ: ผู้ว่าจ้าง (Customer) และ ช่าง (Worker)
+================================================================================
+
+  🆕 Feature ที่เพิ่มใหม่ในเวอร์ชันนี้:
+     • ยืนยันอีเมล / เบอร์โทร ด้วย OTP
+     • ลืมรหัสผ่าน / ตั้งรหัสผ่านใหม่ผ่าน OTP
+     • ยืนยันตัวตนช่าง (อัพโหลดบัตรประชาชน)
+     • อัพโหลดรูปภาพ (แชท / avatar / verify)
+     • รายงานผู้ใช้ (Report)
+     • WebSocket (แชทและ Notification แบบ Real-time)
+     • ประวัติรีวิวที่ลูกค้าเคยให้ (สำหรับช่างดู)
+
+  เอกสารนี้อธิบายแต่ละ Feature อย่างละเอียด เพื่อให้เข้าใจตอนลงมือทำจริง
+  รวมถึง: หน้าจอที่ต้องสร้าง, ข้อมูลที่แสดง, เงื่อนไข, และ flow การทำงาน
+
+--------------------------------------------------------------------------------
+  API Base URL : http://localhost:9543/api
+  Auth Header  : Authorization: Bearer <access_token>
+  Token Storage: localStorage key = "ct_access" (access), "ct_refresh" (refresh)
+--------------------------------------------------------------------------------
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ส่วนที่ 1 — แอพผู้ว่าจ้าง (CUSTOMER APP)
+════════════════════════════════════════════════════════════════════════════════
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 1 : ระบบบัญชี (Account & Auth)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[1.1] สมัครสมาชิก
+  API    : POST /auth/register
+  ข้อมูลที่รับ:
+    - firstName, lastName (ชื่อ-นามสกุล)
+    - email (ต้องไม่ซ้ำในระบบ)
+    - phone (ต้องไม่ซ้ำในระบบ)
+    - password (อย่างน้อย 8 ตัว, มีตัวอักษร + ตัวเลข)
+    - passwordConfirm (ต้องตรงกัน)
+    - role = "customer" (สำหรับแอพนี้ fix ค่าได้เลย)
+    - acceptTerms = true (checkbox ยอมรับ)
+  เงื่อนไข:
+    - Rate limit: สมัครได้ 5 ครั้ง/ชั่วโมง ต่อ IP
+    - ถ้า email หรือ phone ซ้ำ → error "user_exists"
+  ผลลัพธ์:
+    - ได้รับ accessToken + refreshToken กลับมาทันที (login เลย ไม่ต้อง verify email ก่อน)
+    - เซฟ token ลง storage แล้วพาไปหน้า Home
+
+[1.2] เข้าสู่ระบบ
+  API    : POST /auth/login
+  ข้อมูลที่รับ:
+    - identifier = อีเมล หรือ เบอร์โทร (ใช้ได้ทั้งสอง)
+    - password
+    - remember = true/false (ถ้า false ให้ใช้ sessionStorage แทน)
+  เงื่อนไข:
+    - Rate limit: ลองได้ 10 ครั้ง/15 นาที
+    - ถ้าใส่รหัสผิด 5 ครั้งใน 15 นาที → บัญชีถูกล็อก 15 นาที
+    - บัญชีที่ถูก Admin ปิด (is_active=0) → ล็อกอินไม่ได้
+  ผลลัพธ์:
+    - ได้รับ accessToken (อายุ ~15 นาที) + refreshToken (อายุ 30 วัน)
+    - เซฟ token แล้วพาไปหน้า Home
+
+[1.3] ออกจากระบบ
+  API    : POST /auth/logout
+  ข้อมูลที่รับ:
+    - refreshToken (ส่งไปเพื่อ revoke ที่ server ด้วย)
+  การทำงาน:
+    - ลบ token ออกจาก storage
+    - Server จะ revoke refresh token นั้น (ใช้ซ้ำไม่ได้อีก)
+    - พาไปหน้า login
+
+[1.4] Refresh Access Token (ทำ auto ใน background)
+  API    : POST /auth/refresh
+  ข้อมูลที่รับ:
+    - refreshToken
+  การทำงาน:
+    - เรียกทุกครั้งที่ API ตอบ 401 (token หมดอายุ)
+    - ได้ accessToken ใหม่ + refreshToken ใหม่ (Token Rotation)
+    - ถ้า refresh token หมดอายุด้วย → ไล่ไปหน้า login
+  หมายเหตุ:
+    - ควรทำใน interceptor ของ HTTP client
+    - ไม่ให้ user รู้สึกว่าถูกบังคับ logout
+
+[1.5] ดูข้อมูลโปรไฟล์ตัวเอง
+  API    : GET /users/me
+  ข้อมูลที่แสดง:
+    - ชื่อ-นามสกุล, อีเมล, เบอร์โทร
+    - สถานะยืนยันอีเมล (email_verified_at)
+    - สถานะยืนยันเบอร์โทร (phone_verified_at)
+    - วันที่สมัคร, วันที่ login ล่าสุด
+  หน้าจอ:
+    - หน้า "โปรไฟล์" แสดงข้อมูลนี้ทั้งหมด
+    - ถ้า email ยังไม่ verify → แสดง banner เตือน
+
+[1.6] แก้ไขชื่อ-นามสกุล
+  API    : PATCH /users/me
+  ข้อมูลที่แก้ได้: firstName, lastName, newsletterOptIn
+  หน้าจอ:
+    - Form ง่ายๆ ใน Settings → ข้อมูลส่วนตัว
+    - กด save → ส่ง PATCH → refresh ข้อมูลหน้า
+
+[1.7] เปลี่ยนรหัสผ่าน
+  API    : PATCH /users/me/password
+  ข้อมูลที่รับ:
+    - currentPassword (รหัสปัจจุบัน ต้องถูกต้อง)
+    - newPassword (8+ ตัว, มีตัวอักษร + เลข)
+  เงื่อนไข:
+    - หลังเปลี่ยนสำเร็จ: refresh token ทั้งหมดถูก revoke ทันที
+    - ต้อง login ใหม่ (token เก่าใช้ไม่ได้)
+  หน้าจอ:
+    - Settings → เปลี่ยนรหัสผ่าน
+    - หลัง success → แจ้งว่าต้อง login ใหม่ → ล้าง storage → ไปหน้า login
+
+[1.8] ลบบัญชี (PDPA - สิทธิ์ขอลบข้อมูล)
+  API    : DELETE /users/me
+  การทำงาน:
+    - Soft delete: ตั้ง is_active = 0 ก่อน
+    - ข้อมูลจริงจะถูกลบใน 90 วัน (ตาม PDPA)
+    - revoke refresh token ทั้งหมด
+  หน้าจอ:
+    - Settings → บัญชี → ลบบัญชี
+    - ต้องมี confirm dialog ชัดเจน ("ข้อมูลจะถูกลบใน 90 วัน")
+    - หลัง confirm → logout และไปหน้า home
+
+[1.9] ดูประวัติการยินยอม (PDPA)
+  API    : GET /users/me/consent
+  ข้อมูลที่แสดง:
+    - ประเภทเอกสาร (terms / privacy_policy / cookie)
+    - เวอร์ชันที่ยินยอม
+    - วันเวลาที่ยินยอม
+    - IP ที่ใช้ตอนยินยอม
+  หน้าจอ:
+    - Settings → ความเป็นส่วนตัว → ประวัติการยินยอม
+
+[1.10] บันทึกการยินยอม
+  API    : POST /users/me/consent
+  ข้อมูลที่รับ:
+    - documentType: "terms" | "privacy_policy" | "cookie"
+    - documentVersion: เช่น "1.0"
+    - accepted: true/false
+  เมื่อต้องเรียก:
+    - ตอนสมัครสมาชิก (terms + privacy_policy)
+    - ตอนมีการเปลี่ยนแปลงนโยบาย (แสดง popup ให้ยินยอมใหม่)
+
+[1.11] ลงทะเบียน Device Token (สำหรับ Push Notification)
+  API    : POST /users/me/device-token
+  ข้อมูลที่รับ:
+    - token: Firebase/APNs token ของอุปกรณ์
+    - platform: "fcm" (Android) | "apns" (iOS) | "web"
+    - deviceName: ชื่ออุปกรณ์ (optional)
+  เมื่อต้องเรียก:
+    - หลัง login สำเร็จทุกครั้ง
+    - หลังได้ token ใหม่จาก Firebase
+
+[1.12] ยกเลิก Device Token
+  API    : DELETE /users/me/device-token
+  เมื่อต้องเรียก:
+    - ตอน logout → ส่ง token ปัจจุบันไปด้วย
+    - เพื่อหยุดรับ push notification บนอุปกรณ์นั้น
+
+🆕 [1.13] ยืนยันอีเมล ด้วย OTP
+  ทำไมต้องทำ:
+    - งาน Level 3+ บางงานกำหนดว่าต้องยืนยันอีเมลก่อน
+    - แสดง badge "ยืนยันแล้ว ✓" ในโปรไฟล์
+    - เพิ่มความน่าเชื่อถือให้บัญชี
+  ขั้นตอน (2 ขั้น):
+
+  ขั้น 1 — ขอ OTP
+    API  : POST /verify/email/send
+    Body : ไม่ต้องส่งอะไร (server ใช้ email จาก token)
+    เงื่อนไข:
+      - Rate limit: 5 ครั้ง/ชั่วโมง ต่อ IP
+      - รอ 60 วินาทีก่อนขอใหม่ได้
+      - ถ้า email ยืนยันแล้ว → error "already_verified"
+    Response:
+      { "ok": true, "message": "ส่ง OTP ไปยัง ...@..." }
+    UX: แสดง "กรอก OTP ที่ส่งไปยัง abc***@gmail.com"
+        + ปุ่ม "ส่งใหม่" (disable 60 วินาที)
+
+  ขั้น 2 — ยืนยัน OTP
+    API  : POST /verify/email/confirm
+    Body : { "code": "123456" }
+    เงื่อนไข:
+      - OTP มีอายุ 10 นาที
+      - ลองผิดได้ไม่เกิน 5 ครั้ง (ถ้าเกิน OTP ถูก invalidate ต้องขอใหม่)
+    Response (สำเร็จ):
+      { "ok": true, "message": "ยืนยันอีเมลสำเร็จ" }
+    Response (ผิด):
+      { "ok": false, "error": { "code": "invalid_otp", "message": "รหัสไม่ถูกต้อง" } }
+    หลังสำเร็จ:
+      - อัพเดต email_verified_at ใน /users/me
+      - ซ่อน banner เตือน และแสดง badge ✓
+
+🆕 [1.14] ยืนยันเบอร์โทร ด้วย OTP
+  เหมือนกับยืนยันอีเมล แต่ส่ง SMS แทน
+
+  ขั้น 1 — ขอ OTP
+    API  : POST /verify/phone/send
+    Body : ไม่ต้องส่ง (ใช้เบอร์จาก token)
+    หมายเหตุ Dev: ตอนพัฒนา OTP จะ log ใน console ของ server
+                  ไม่ต้องมี SMS จริง
+
+  ขั้น 2 — ยืนยัน OTP
+    API  : POST /verify/phone/confirm
+    Body : { "code": "123456" }
+    เงื่อนไขและ flow เหมือนกับ email confirm ทุกอย่าง
+
+  หน้าจอที่ต้องสร้าง:
+    - หน้า "การยืนยันตัวตน" ใน Settings
+    - แสดงสถานะ: อีเมล [✓ ยืนยันแล้ว / ⚠ ยังไม่ยืนยัน]
+    - แสดงสถานะ: เบอร์โทร [✓ ยืนยันแล้ว / ⚠ ยังไม่ยืนยัน]
+    - ปุ่ม "ยืนยันเดี๋ยวนี้" ถัดจากรายการที่ยังไม่ยืนยัน
+
+🆕 [1.15] ลืมรหัสผ่าน
+  API  : POST /auth/forgot-password
+  Body : { "identifier": "email หรือ เบอร์โทร" }
+  เงื่อนไข:
+    - Rate limit: 5 ครั้ง/15 นาที ต่อ IP
+    - ถ้า email → ส่ง OTP ทาง email
+    - ถ้าเบอร์โทร (ขึ้นต้นด้วยตัวเลข ไม่มี @) → ส่ง OTP ทาง SMS
+  Response (เสมอ — ไม่บอกว่าบัญชีมีอยู่จริงหรือไม่):
+    { "ok": true, "message": "ถ้าบัญชีนี้มีอยู่ คุณจะได้รับรหัส OTP เร็วๆ นี้" }
+  UX:
+    - แสดงข้อความนี้ทั้งในกรณีที่บัญชีมีอยู่และไม่มีอยู่ (Anti-enumeration)
+    - พาไปหน้า "กรอก OTP" พร้อมเก็บ identifier ไว้
+
+🆕 [1.16] ตั้งรหัสผ่านใหม่ด้วย OTP
+  API  : POST /auth/reset-password
+  Body :
+    {
+      "identifier" : "email หรือ เบอร์โทร",
+      "code"       : "123456",
+      "newPassword": "รหัสใหม่ (8+ ตัว มีตัวอักษร+เลข)"
+    }
+  เงื่อนไข:
+    - OTP ใช้ได้ภายใน 10 นาทีหลังจากขอ
+    - ลองผิดได้ไม่เกิน 5 ครั้ง
+  Response (สำเร็จ):
+    { "ok": true, "message": "เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบใหม่" }
+  การทำงานหลังบ้าน:
+    - hash รหัสใหม่ด้วย bcrypt
+    - revoke refresh token ทั้งหมดของ user นี้ (security)
+    - บันทึก audit log
+  UX:
+    - หน้า "ตั้งรหัสผ่านใหม่": กรอก OTP + รหัสใหม่ + ยืนยันรหัสใหม่
+    - หลังสำเร็จ → ล้าง storage → ไปหน้า Login
+    - แสดง "เปลี่ยนรหัสสำเร็จ! กรุณาเข้าสู่ระบบใหม่"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 2 : ค้นหาและดูโปรไฟล์ช่าง (Find Worker)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[2.1-2.6] ค้นหาช่าง
+  API    : GET /workers
+  filter ที่ใช้ได้ (ผสมกันได้):
+    - skillId     = ID สกิลที่ต้องการ
+    - provinceId  = จังหวัดที่ต้องการ
+    - districtId  = อำเภอที่ต้องการ
+    - level       = ระดับฝีมือขั้นต่ำ (1-5)
+    - ratingMin   = คะแนนรีวิวขั้นต่ำ
+    - priceMax    = ราคาสูงสุดที่รับได้
+    - q           = คำค้นหา (ชื่อช่าง, bio)
+    - page, limit = pagination
+  ข้อมูลที่ได้กลับมา (ต่อ 1 ช่าง):
+    - id, firstName, lastName
+    - bio, avatarUrl
+    - ratingAvg (คะแนนเฉลี่ย), ratingCount (จำนวนรีวิว)
+    - isVerified (ผ่านการยืนยันหรือไม่)
+    - skills[] = สกิลทั้งหมดของช่างรายนี้
+  หน้าจอ:
+    - หน้า "ค้นหาช่าง" มีช่องกรองด้านบน
+    - แสดงเป็น card list เรียงตาม rating (สูง→ต่ำ)
+    - ถ้ายังไม่เลือก filter → แสดงช่างทั้งหมดในระบบ
+
+[2.7] ดูโปรไฟล์ช่าง (รายละเอียด)
+  API    : GET /workers/:id
+  ข้อมูลที่ได้กลับมา:
+    - ข้อมูลพื้นฐาน + bio + avatar + rating
+    - skills[] = สกิลทุกอัน พร้อมระดับ, ราคา, วิธีคิดเงิน
+    - areas[]  = พื้นที่ให้บริการ (จังหวัด + อำเภอ)
+    - recentRatings[] = รีวิวล่าสุด 10 อัน (เฉพาะที่ isPublic=true)
+  หน้าจอ:
+    - รูปโปรไฟล์ + ชื่อ + badge ว่า verified หรือไม่
+    - คะแนน ★★★★☆ พร้อมจำนวนรีวิว
+    - ตารางสกิลและราคา
+    - แผนที่/รายชื่อพื้นที่บริการ
+    - รายการรีวิวจากลูกค้า
+    - ปุ่ม "จ้างช่างคนนี้โดยตรง" → ไปหน้า Direct Hire
+
+[2.8] ดูรีวิวช่างทั้งหมด
+  API    : GET /ratings/worker/:workerId
+  ข้อมูลที่ได้กลับมา:
+    - summary: ratingAvg, ratingCount
+    - ratings[]: ดาว, ข้อความรีวิว, ชื่องาน, ระดับงาน, ราคาที่ตกลง
+  หน้าจอ:
+    - หน้าแยก "รีวิวทั้งหมด" ของช่างคนนี้
+    - แสดง distribution ดาว (5★/4★/3★...)
+
+🆕 [2.9] ดูประวัติรีวิวที่ลูกค้าเคยให้ (Customer Review History)
+  ใช้ทำไม:
+    - ช่างสามารถดูก่อนรับงานว่าลูกค้าคนนี้เคยให้รีวิวแบบไหน
+    - เช็คว่าลูกค้าให้ดาวต่ำบ่อยหรือเปล่า ก่อนตัดสินใจสมัครงาน
+  API    : GET /ratings/customer/:customerId
+  ข้อมูลที่ได้กลับมา:
+    summary:
+      - total_reviews  : รีวิวที่ลูกค้าให้ช่างทั้งหมดกี่ครั้ง
+      - avg_stars_given : เฉลี่ยดาวที่ให้
+      - stars_5 / stars_4 / stars_3 / stars_low : จำนวนแต่ละระดับ
+    ratings[]:
+      - ดาวที่ให้, ข้อความรีวิว, ชื่องาน, ระดับงาน
+  หน้าจอ:
+    - ปุ่ม "ดูประวัติรีวิว" ในโปรไฟล์ลูกค้า (มองเห็นได้เฉพาะช่าง)
+    - หรือแสดงในหน้ารายละเอียดงาน ส่วน "เกี่ยวกับผู้ว่าจ้าง"
+    - แสดง: "ให้รีวิวแล้ว X ครั้ง เฉลี่ย ★ Y.Y"
+
+[2.10-2.11] โหลด Skill และหมวดหมู่ (สำหรับ filter/form)
+  API    : GET /skills/categories → ได้หมวด
+           GET /skills?categoryId=X → ได้สกิลในหมวดนั้น
+  ใช้ตอนไหน:
+    - ตอนทำ filter ค้นหาช่าง (dropdown เลือกสกิล)
+    - ตอนโพสงาน (เลือก skill ให้งาน)
+  หมายเหตุ:
+    - แนะนำ cache ไว้ ไม่ต้อง fetch ทุกครั้ง (ข้อมูลเปลี่ยนน้อย)
+
+[2.11-2.13] โหลดข้อมูลที่ตั้ง
+  API    : GET /locations/provinces
+           GET /locations/districts?provinceId=X
+           GET /locations/subdistricts?districtId=X
+  ใช้ตอนไหน:
+    - form ทุกที่ที่ต้องเลือกจังหวัด/อำเภอ/ตำบล
+    - เลือก Cascading: จังหวัด → load อำเภอ → load ตำบล
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 3 : จัดการประกาศงาน (Job Management)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[3.1] โพสประกาศงานใหม่
+  API    : POST /jobs
+  ข้อมูลที่รับ:
+    - title       : ชื่องาน (5-255 ตัว)
+    - description : รายละเอียด (10-2000 ตัว)
+    - jobLevel    : ระดับงาน 1-5 (กำหนดว่าหักตั๋วช่างกี่ใบ)
+    - budgetType  : "fixed" (กำหนดราคา) หรือ "open" (ต่อรองได้)
+    - budgetAmount: ราคา (ถ้าเป็น fixed)
+    - provinceId  : จังหวัดที่งานอยู่
+    - districtId  : อำเภอ (optional)
+    - subdistrictId: ตำบล (optional)
+    - latitude, longitude: พิกัด GPS (optional)
+    - addressNote : รายละเอียดที่อยู่ เช่น "บ้านอยู่ตรอกแรก"
+    - skillIds[]  : สกิลที่ต้องการ (1-5 อัน)
+  เงื่อนไข:
+    - งานจะหมดอายุอัตโนมัติใน 24 ชั่วโมง
+    - ถ้าไม่มีช่างสมัครก่อนหมดอายุ → status เปลี่ยนเป็น "expired"
+  ระดับงาน (job_level):
+    - Level 1: งานเล็ก ง่าย   → ช่างเสีย 1 ตั๋ว
+    - Level 2: งานทั่วไป      → ช่างเสีย 2 ตั๋ว
+    - Level 3: งานใหญ่        → ช่างเสีย 3 ตั๋ว (ต้องผ่าน verify)
+    - Level 4: งานซับซ้อน     → ช่างเสีย 4 ตั๋ว (ต้องผ่าน verify)
+    - Level 5: งานใหญ่มาก    → ช่างเสีย 5 ตั๋ว (ต้องผ่าน verify)
+  หน้าจอ:
+    - Form หลายขั้นตอน (wizard) หรือ scroll-form เดียว
+    - เลือก skill ก่อน → โหลดหมวดสกิล → เลือกสกิลได้ 1-5 อัน
+    - เลือกจังหวัด → cascade โหลดอำเภอ
+    - เลือก jobLevel → แสดงว่าช่างจะเสียตั๋วกี่ใบ (UI hint)
+
+[3.2] ดูรายการงานของตัวเอง
+  API    : GET /jobs?status=open&page=1
+  filter ที่ใช้ได้:
+    - status: open | matched | in_progress | completed | expired | cancelled
+  ข้อมูลที่ได้กลับมา:
+    - รายการงาน พร้อม: ชื่อ, status, วันโพส, จำนวนคนสมัคร, จำนวนวิว
+  หน้าจอ:
+    - Tab bar: ทั้งหมด | เปิดรับ | กำลังดำเนิน | เสร็จแล้ว | หมดอายุ
+    - แต่ละ card กดเข้าไปดูรายละเอียดได้
+
+[3.3] ดูรายละเอียดงาน
+  API    : GET /jobs/:id
+  ข้อมูลที่ได้กลับมา:
+    - ข้อมูลงานครบ + ชื่อผู้โพส + จังหวัด/อำเภอ
+    - skills[] = สกิลที่ต้องการ
+    - viewCount, applicationCount
+  หน้าจอ:
+    - แสดงรายละเอียดงานทั้งหมด
+    - ถ้า status = open → มีปุ่ม "ดูผู้สมัคร" + "แก้ไข" + "ยกเลิก"
+
+[3.4] แก้ไขงาน
+  API    : PATCH /jobs/:id
+  แก้ได้เฉพาะ: title, description, budgetType, budgetAmount, addressNote
+  เงื่อนไข:
+    - แก้ได้เฉพาะงานที่ status = "open" เท่านั้น
+    - ถ้า matched/in_progress แล้ว → แก้ไม่ได้
+
+[3.5] ยกเลิกประกาศงาน
+  API    : DELETE /jobs/:id
+  เงื่อนไข:
+    - ยกเลิกได้เฉพาะ status = "open" เท่านั้น
+    - ถ้าจับคู่แล้ว (matched) → ต้องไปยกเลิกผ่าน match แทน
+  หน้าจอ:
+    - ปุ่ม "ยกเลิกประกาศ" → confirm dialog → เรียก API
+
+[3.6] ดูรายการช่างที่สมัคร
+  API    : GET /jobs/:id/applications
+  ข้อมูลที่ได้กลับมา (ต่อ 1 ใบสมัคร):
+    - ชื่อช่าง, รูป, rating_avg, rating_count, isVerified
+    - ราคาที่เสนอ (proposed_price)
+    - ข้อความที่ส่งมา (message)
+    - วันที่สมัคร
+  หน้าจอ:
+    - รายการ card ช่างที่สมัคร เรียงตาม rating สูง→ต่ำ
+    - กด card → ดูโปรไฟล์ช่างแบบ preview
+    - ปุ่ม "เลือกช่างนี้" ใต้แต่ละ card
+
+[3.7] เลือกช่างที่ต้องการ (จากใบสมัคร)
+  API    : POST /jobs/:id/select/:appId
+  การทำงาน (server จัดการ):
+    - ยืนยัน application ที่เลือก → status = "accepted"
+    - ปฏิเสธ application ที่เหลือทั้งหมด → status = "rejected"
+    - เปลี่ยน job status → "matched"
+    - สร้าง job_match record อัตโนมัติ
+    - สร้าง chat_room อัตโนมัติ (ลูกค้า+ช่าง)
+    - ส่ง notification ให้ช่างทันที "คุณได้รับงาน!"
+  หน้าจอ:
+    - กด confirm → loading → success → redirect ไปหน้า Match detail
+
+[3.8] จ้างช่างโดยตรง (Direct Hire) — ไม่ต้องโพสงาน
+  API    : POST /matches/direct
+  ข้อมูลที่รับ:
+    - workerId    : ID ช่างที่ต้องการ
+    - skillId     : สกิลที่ต้องการ
+    - title       : ชื่องาน
+    - description : รายละเอียด
+    - agreedPrice : ราคาที่ตกลงกัน
+    - provinceId, districtId, addressNote: ที่อยู่งาน
+    - scheduledAt : วันเวลานัดหมาย (optional)
+  การทำงาน:
+    - สร้างงานและ match ในทีเดียว (ข้ามขั้นตอน apply/select)
+    - สร้าง chat_room อัตโนมัติ
+    - ส่ง notification ให้ช่าง
+  ใช้เมื่อ:
+    - เจอช่างที่ใช่จากหน้าค้นหา → กด "จ้างเลย"
+    - เคยใช้ช่างคนนี้แล้วพอใจ ต้องการจ้างซ้ำ
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 4 : จัดการงานที่จับคู่แล้ว (Match Management)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  สถานะของ Match:
+    matched     = จับคู่แล้ว รอช่างมารับงาน
+    in_progress = ช่างกดเริ่มงานแล้ว
+    completed   = ลูกค้ากดยืนยันงานเสร็จ
+    cancelled   = ถูกยกเลิก (ฝ่ายใดฝ่ายหนึ่ง)
+
+[4.1] ดูรายการงานที่จับคู่แล้ว
+  API    : GET /matches?status=in_progress
+  ข้อมูลที่ได้กลับมา:
+    - รายการ match พร้อม: ชื่องาน, ชื่อช่าง, รูปช่าง, rating ช่าง
+    - status, วันที่จับคู่, ราคาที่ตกลง
+    - chat_room_id (สำหรับเปิดแชทได้เลย)
+
+[4.2] ดูรายละเอียดงาน (Match Detail)
+  API    : GET /matches/:id
+  ข้อมูลที่ได้กลับมา:
+    - ข้อมูลครบทุกอย่าง: ชื่องาน, รายละเอียด, ที่อยู่
+    - ข้อมูลช่าง: ชื่อ, เบอร์โทร, avatar, rating, verified
+    - ราคาที่ตกลง, วันนัดหมาย
+    - chat_room_id
+  หน้าจอ:
+    - แสดงสถานะปัจจุบัน (badge)
+    - Timeline: จับคู่ → เริ่มงาน → เสร็จงาน
+    - ปุ่มโทรหาช่าง (เบอร์โทร)
+    - ปุ่ม "เปิดแชท"
+    - ปุ่ม "ยืนยันงานเสร็จ" (ถ้า in_progress)
+    - ปุ่ม "ยกเลิกงาน" (ถ้า matched หรือ in_progress)
+
+[4.3] ยืนยันงานเสร็จสิ้น (สำคัญมาก!)
+  API    : PATCH /matches/:id/complete
+  เงื่อนไข:
+    - ทำได้เฉพาะ role = customer
+    - status ต้องเป็น matched หรือ in_progress
+  การทำงาน (server จัดการ):
+    - เปลี่ยน match status → "completed"
+    - เปลี่ยน job status → "completed"
+    - ล็อก chat room (ส่งข้อความไม่ได้อีก)
+    - ส่ง notification ให้ช่าง "งานเสร็จสิ้น!"
+  หลังจากนี้:
+    - redirect ไปหน้า "ให้คะแนนช่าง" ทันที
+
+[4.4] ยกเลิกงาน
+  API    : PATCH /matches/:id/cancel
+  ข้อมูลที่รับ:
+    - reason: เหตุผล (5-255 ตัว) — บังคับ!
+  เงื่อนไข:
+    - ยกเลิกได้ตอน: matched หรือ in_progress เท่านั้น
+    - ทั้งลูกค้าและช่างยกเลิกได้
+  การทำงาน:
+    - บันทึกว่าใครเป็นคนยกเลิก (cancelled_by)
+    - เปลี่ยน job กลับเป็น "open" (เปิดรับสมัครใหม่ได้!)
+    - ส่ง notification ให้อีกฝ่าย
+  หน้าจอ:
+    - กด "ยกเลิกงาน" → dialog ให้กรอกเหตุผล → confirm
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 5 : รีวิวช่าง (Rating)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[5.1-5.2] ให้คะแนนและรีวิวช่าง
+  API    : POST /ratings
+  ข้อมูลที่รับ:
+    - matchId   : ID งานที่จะรีวิว
+    - stars     : 1-5 ดาว
+    - reviewText: ข้อความรีวิว (optional, max 1000 ตัว)
+  เงื่อนไข:
+    - ทำได้เฉพาะ role = customer
+    - งานต้อง status = "completed" แล้ว
+    - รีวิวซ้ำไม่ได้ (1 งาน = 1 รีวิว)
+  การทำงาน:
+    - บันทึกรีวิว
+    - คำนวณ rating_avg ของช่างใหม่อัตโนมัติ
+    - ส่ง notification ให้ช่าง "คุณได้รับ X ดาว!"
+  หน้าจอ:
+    - หลังยืนยันงานเสร็จ → auto redirect มาหน้านี้
+    - Star rating (กดดาว 1-5)
+    - Text area เขียนรีวิว (optional)
+    - ปุ่ม "ข้ามการรีวิว" (ถ้าไม่ต้องการ)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 6 : แชท (Chat)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[6.1] รายการห้องแชท
+  API    : GET /chat
+  ข้อมูลที่ได้กลับมา (ต่อ 1 ห้อง):
+    - ชื่องาน, ชื่ออีกฝ่าย, รูปอีกฝ่าย
+    - ข้อความล่าสุด
+    - unread_count (จำนวนข้อความที่ยังไม่ได้อ่าน)
+    - last_message_at (เรียงตามนี้)
+  หน้าจอ:
+    - รายการ chat คล้าย LINE
+    - ถ้า unread > 0 → แสดง badge สีแดง
+
+[6.2] เปิดห้องแชทและโหลดข้อความ
+  API    : GET /chat/:roomId?limit=50
+  หมายเหตุ:
+    - โหลดมา 50 ข้อความล่าสุดก่อน
+    - ถ้าเลื่อนขึ้นโหลดเพิ่ม → ส่ง before=<id ข้อความแรกที่โหลดมา>
+    - การเปิดห้อง → mark all as read อัตโนมัติ
+  ข้อมูลข้อความ:
+    - id, senderId, messageType (text/image)
+    - content, imageUrl
+    - readAt (null = ยังไม่ได้อ่าน)
+
+[6.3] ส่งข้อความ
+  API    : POST /chat/:roomId
+  ข้อมูลที่รับ:
+    - content     : ข้อความ (max 2000 ตัว)
+    - messageType : "text" | "image"
+    - imageUrl    : URL รูป (ถ้าเป็น image type)
+  เงื่อนไข:
+    - ห้องที่ถูกล็อก (is_locked=1) → ส่งไม่ได้
+    - ห้องล็อกหลังงาน complete
+  Push Notification:
+    - อีกฝ่ายได้รับ push "ข้อความใหม่" พร้อม preview ข้อความ
+
+[6.4] มาร์กอ่านแล้ว
+  API    : PATCH /chat/:roomId/read
+  ใช้เมื่อ: เปิดห้องแชทแล้ว (mark ทุกข้อความที่ยังไม่ได้อ่าน)
+
+🆕 [6.5] ส่งรูปภาพในแชท (ใช้ร่วมกับ Upload)
+  ขั้นตอน (2 ขั้น):
+
+  ขั้น 1 — อัพโหลดรูปก่อน
+    API  : POST /upload/image?purpose=chat
+    Body : multipart/form-data  field ชื่อ "image"
+    ข้อจำกัด: ขนาดไม่เกิน 5 MB, นามสกุล JPG/PNG/WebP/GIF เท่านั้น
+    Response:
+      {
+        "ok"      : true,
+        "url"     : "http://localhost:9543/uploads/chat/abc123.jpg",
+        "fileId"  : 42,
+        "filename": "abc123.jpg",
+        "size"    : 204800,
+        "mimeType": "image/jpeg"
+      }
+
+  ขั้น 2 — ส่งข้อความแนบ URL รูป
+    API  : POST /chat/:roomId
+    Body :
+      {
+        "messageType": "image",
+        "imageUrl"   : "http://localhost:9543/uploads/chat/abc123.jpg",
+        "content"    : ""   (หรือ caption ถ้าอยากมี)
+      }
+  UX:
+    - ปุ่มรูปภาพ → เปิด image picker → เลือกรูป → อัพโหลด → ได้ URL → ส่ง
+    - แสดง progress bar ตอนอัพโหลด
+    - ถ้าอัพโหลดสำเร็จ → ส่งข้อความ image type ทันที
+    - แชทแสดงรูปแบบ thumbnail กด expand ดูเต็มจอได้
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 7 : การแจ้งเตือน (Notification)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ประเภท Notification ที่ผู้ว่าจ้างจะได้รับ:
+    new_application  = มีช่างใหม่สมัครงานของคุณ
+    job_started      = ช่างเริ่มงานแล้ว
+    job_cancelled    = ช่าง/ลูกค้ายกเลิกงาน
+    new_message      = มีข้อความใหม่ในแชท
+
+[7.1] ดูรายการแจ้งเตือน
+  API    : GET /notifications?page=1&limit=20
+  ข้อมูลต่อ 1 รายการ:
+    - type, title, body
+    - data (JSON) = ข้อมูลเพิ่มเติม เช่น job_id, match_id
+    - isRead, createdAt
+
+[7.2] กรองเฉพาะที่ยังไม่ได้อ่าน
+  API    : GET /notifications?unreadOnly=true
+  ใช้ตอน: แสดง badge ตัวเลขบน bell icon
+
+[7.3-7.4] Mark as Read
+  API    : PATCH /notifications/read-all   (อ่านทั้งหมด)
+           PATCH /notifications/:id/read   (อ่านรายการเดียว)
+
+[7.5] ลบการแจ้งเตือน
+  API    : DELETE /notifications/:id
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆕 หมวด 8 : อัพโหลดรูปภาพ (Upload)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ใช้ได้ทั้ง Customer และ Worker — สำหรับ: รูปโปรไฟล์, รูปในแชท, รูปบัตร verify
+
+[8.1] อัพโหลดรูปภาพ
+  API  : POST /upload/image?purpose=<ประเภท>
+  ประเภท (purpose) ที่รองรับ:
+    - avatar    : รูปโปรไฟล์
+    - chat      : รูปในแชท
+    - verify_id : รูปบัตรประชาชน / selfie สำหรับ verify ช่าง
+    - other     : อื่นๆ
+  วิธีส่ง: multipart/form-data  field ชื่อ "image"
+  ข้อจำกัด:
+    - ขนาดสูงสุด: 5 MB
+    - นามสกุลที่รองรับ: .jpg .jpeg .png .webp .gif
+    - ต้องมี auth token (ต้อง login ก่อน)
+  Response:
+    {
+      "ok"      : true,
+      "url"     : "http://localhost:9543/uploads/avatar/uuid.jpg",
+      "fileId"  : 7,
+      "filename": "uuid.jpg",
+      "size"    : 153600,
+      "mimeType": "image/jpeg"
+    }
+  Error ที่พบบ่อย:
+    - "invalid_type"   : นามสกุลไม่รองรับ
+    - "file_too_large" : ไฟล์ใหญ่เกิน 5MB
+    - "no_file"        : ไม่ได้แนบไฟล์มา
+
+[8.2] ลบรูปภาพที่อัพโหลดไว้
+  API  : DELETE /upload/:fileId
+  เงื่อนไข: ลบได้เฉพาะไฟล์ของตัวเอง (owner เท่านั้น)
+  การทำงาน: ลบไฟล์จาก disk + ลบ record ใน DB
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆕 หมวด 9 : รายงานผู้ใช้ (Report User)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ใช้เมื่อเจอผู้ใช้ที่มีพฤติกรรมไม่เหมาะสม หรือเนื้อหาที่ละเมิดกฎ
+
+[9.1] ส่งรายงาน
+  API  : POST /reports
+  Body :
+    {
+      "targetType": "user" | "job" | "match" | "message",
+      "targetId"  : ID ของสิ่งที่รายงาน,
+      "reason"    : "spam" | "inappropriate" | "scam" | "harassment" | "other",
+      "description": "รายละเอียดเพิ่มเติม (optional, max 1000 ตัว)"
+    }
+  เงื่อนไข:
+    - Rate limit: 10 ครั้ง/ชั่วโมง
+    - รายงานเป้าหมายเดียวกันซ้ำในรอบ 24 ชั่วโมงไม่ได้
+    - รายงานตัวเองไม่ได้
+  targetType ใช้เมื่อไหน:
+    - "user"    : รายงานผู้ใช้ที่มีพฤติกรรมไม่เหมาะสม (ส่ง targetId = user ID)
+    - "job"     : รายงานประกาศงานที่น่าสงสัย (ส่ง targetId = job ID)
+    - "match"   : รายงานปัญหาในงาน (ส่ง targetId = match ID)
+    - "message" : รายงานข้อความเฉพาะในแชท (ส่ง targetId = message ID)
+  Response:
+    { "ok": true, "reportId": 5 }
+  UX:
+    - ปุ่ม "..." หรือ ⚑ ในโปรไฟล์ผู้ใช้/ประกาศงาน
+    - Bottom sheet: เลือกเหตุผล (radio) + textarea รายละเอียด (optional)
+    - กด "ส่งรายงาน" → toast "ส่งรายงานเรียบร้อย ทีมงานจะตรวจสอบ"
+
+[9.2] ดูรายงานที่ตัวเองเคยส่ง
+  API  : GET /reports/my
+  ข้อมูลที่ได้:
+    - targetType, targetId, reason
+    - status: pending / reviewed / resolved / dismissed
+    - createdAt
+  ใช้ตอน: หน้า "รายงานของฉัน" ใน Settings (optional แต่ UX ดี)
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ส่วนที่ 2 — แอพช่าง / ผู้รับจ้าง (WORKER APP)
+════════════════════════════════════════════════════════════════════════════════
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 1 : ระบบบัญชี (Account & Auth)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  เหมือนกับแอพลูกค้า ยกเว้น:
+  - ตอนสมัคร: role = "worker" (fix ค่า)
+  - GET /users/me จะได้ workerProfile ด้วย:
+      bio, avatarUrl, ratingAvg, ratingCount
+      ticketsBalance (ยอดตั๋วคงเหลือ)
+      isVerified (ผ่านการยืนยันตัวตนหรือยัง)
+      verifiedAt (วันที่ผ่าน verify)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 2 : โปรไฟล์ช่าง (Worker Profile Setup)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ** ช่างต้องตั้งค่าโปรไฟล์ก่อน จึงจะเห็นงานในฟีด **
+  (ถ้ายังไม่มี skills + areas → ฟีดงานจะว่างเปล่า)
+
+[2.1] แก้ไข Bio และรูปโปรไฟล์
+  API    : PUT /workers/me/profile
+  ข้อมูลที่รับ:
+    - bio      : แนะนำตัวเอง (max 1000 ตัว)
+    - avatarUrl: URL รูปโปรไฟล์ (อัพโหลดรูปไปที่ storage ก่อน แล้วส่ง URL มา)
+  หน้าจอ:
+    - กด "แก้ไขโปรไฟล์" → form bio + เลือกรูป
+
+[2.2-2.4] ตั้งค่าสกิลฝีมือ (สำคัญมาก!)
+  API    : PUT /workers/me/skills
+  ข้อมูลที่รับ (เป็น array ของสกิล):
+    skills: [
+      {
+        skillId    : ID สกิล (จาก GET /skills)
+        skillLevel : ระดับความเชี่ยวชาญ 1-5
+        priceType  : "fixed" | "per_hour" | "negotiable"
+        price      : ราคา (บาท)
+        description: รายละเอียดเพิ่มเติมของสกิลนี้ (optional)
+      }
+    ]
+  เงื่อนไข:
+    - ส่งมา array เต็ม → จะ replace ทั้งหมด (ไม่ใช่ append)
+    - ถ้าต้องการเพิ่ม skill ใหม่ → ต้องส่งของเดิมมาด้วย
+    - min 1, max 20 สกิล
+  ระดับสกิล:
+    1 = มือใหม่        2 = พื้นฐาน
+    3 = ปานกลาง       4 = ชำนาญ
+    5 = เชี่ยวชาญ
+  หน้าจอ:
+    - แสดงหมวดสกิล → expand → checkbox เลือก
+    - ถ้าติ๊กแล้ว → show input: ระดับ + ราคา + วิธีคิด
+
+[2.5] ตั้งพื้นที่ให้บริการ (สำคัญมาก!)
+  API    : PUT /workers/me/areas
+  ข้อมูลที่รับ (เป็น array ของพื้นที่):
+    areas: [
+      {
+        provinceId   : จังหวัด (required)
+        districtId   : อำเภอ (optional)
+        subdistrictId: ตำบล (optional)
+      }
+    ]
+  เงื่อนไข:
+    - ส่งมา array เต็ม → replace ทั้งหมด
+    - min 1, max 20 พื้นที่
+    - ถ้าระบุแค่จังหวัด = ให้บริการทั้งจังหวัด
+    - ถ้าระบุถึงอำเภอ = ให้บริการเฉพาะอำเภอนั้น
+  หน้าจอ:
+    - เลือกจังหวัด → เพิ่มลงรายการ
+    - option: เจาะจงถึงอำเภอ
+
+[2.6] อัพเดทพิกัด GPS
+  API    : PUT /workers/me/location
+  ข้อมูลที่รับ:
+    - latitude, longitude : พิกัดปัจจุบัน
+    - serviceRadiusKm     : รัศมีให้บริการ (กม.)
+  เมื่อต้องเรียก:
+    - ตอนเปิดแอพ (ถ้าอนุญาต location)
+    - ตอน login
+  ใช้ทำอะไร:
+    - อนาคต: ลูกค้าหาช่างที่อยู่ใกล้ที่สุดได้
+
+[2.7] ดูสถิติผลงาน
+  API    : GET /workers/me/stats
+  ข้อมูลที่ได้:
+    - completedJobs  : งานที่เสร็จแล้ว
+    - activeJobs     : งานที่กำลังทำอยู่
+    - cancelledJobs  : งานที่ยกเลิก
+    - ratingAvg      : คะแนนเฉลี่ย
+    - ratingCount    : จำนวนรีวิว
+    - ticketsBalance : ตั๋วคงเหลือ
+    - isVerified     : ผ่าน verify หรือไม่
+  หน้าจอ:
+    - Dashboard/Home แสดง stat card 4 ใบ
+    - หรือหน้า "ผลงานของฉัน"
+
+🆕 [2.8] ยืนยันตัวตน — ยื่นคำขอ (Worker ID Verification)
+  ทำไมต้องทำ:
+    - ช่างที่ "ยืนยันแล้ว" จะได้ badge ✓ ในโปรไฟล์
+    - สมัครงาน Level 3, 4, 5 ได้ (งานระดับต่ำยังทำได้โดยไม่ต้อง verify)
+    - ลูกค้าเชื่อถือมากขึ้น
+  สถานะของคำขอ:
+    none       = ยังไม่เคยยื่น
+    pending    = รออนุมัติจาก Admin
+    approved   = อนุมัติแล้ว (isVerified = true)
+    rejected   = ปฏิเสธ (พร้อม rejectReason)
+
+  ขั้นตอน (3 ขั้น):
+
+  ขั้น 1 — อัพโหลดรูปบัตรหน้า
+    API  : POST /upload/image?purpose=verify_id
+    Body : multipart/form-data  field "image" = รูปบัตรหน้า
+    → ได้ URL กลับมา เก็บไว้
+
+  ขั้น 2 — อัพโหลดรูปบัตรหลัง (ถ้ามี) และ selfie
+    เหมือนขั้น 1 ทำซ้ำสำหรับรูปหลัง + รูป selfie ถือบัตร
+    → ได้ URL แต่ละรูป
+
+  ขั้น 3 — ยื่นคำขอ
+    API  : POST /workers/me/verify-id
+    Body :
+      {
+        "idCardFront": "http://.../uploads/verify_id/uuid1.jpg",
+        "idCardBack" : "http://.../uploads/verify_id/uuid2.jpg",  (optional)
+        "selfieUrl"  : "http://.../uploads/verify_id/uuid3.jpg"   (optional)
+      }
+    เงื่อนไข:
+      - ถ้า isVerified = true อยู่แล้ว → error "already_verified"
+      - ถ้ามีคำขอ pending อยู่แล้ว → error "already_pending"
+    Response:
+      { "ok": true, "message": "ยื่นคำขอยืนยันตัวตนแล้ว รอ Admin ตรวจสอบ" }
+
+  หลังจากยื่น:
+    - Admin เห็นในหน้า /api/admin/verify-requests
+    - Admin อนุมัติ → ช่างได้รับ notification "ยืนยันตัวตนสำเร็จ!" + isVerified = true
+    - Admin ปฏิเสธ → ช่างได้รับ notification พร้อมเหตุผล + ยื่นใหม่ได้
+
+🆕 [2.9] ดูสถานะคำขอ Verify
+  API  : GET /workers/me/verify-id
+  Response:
+    {
+      "isVerified"    : false,
+      "verifiedAt"    : null,
+      "latestRequest" : {
+        "id"          : 3,
+        "status"      : "pending",
+        "rejectReason": null,
+        "createdAt"   : "2026-05-01T10:00:00Z"
+      }
+    }
+  หน้าจอ "ยืนยันตัวตน":
+    ถ้า isVerified = true         → แสดง "✓ ยืนยันแล้ว" + วันที่ verify
+    ถ้า latestRequest.status = "pending" → แสดง "⏳ รอการตรวจสอบ"
+    ถ้า latestRequest.status = "rejected"→ แสดงเหตุผล + ปุ่ม "ยื่นใหม่"
+    ถ้าไม่มีคำขอ                 → แสดงปุ่ม "ยืนยันตัวตนเดี๋ยวนี้"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 3 : ฟีดหางาน (Job Feed)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[3.1-3.7] ฟีดงานที่ match กับโปรไฟล์
+  API    : GET /jobs
+  การ filter อัตโนมัติ (server จัดการให้):
+    - แสดงเฉพาะงานที่ status = "open" และยังไม่หมดอายุ
+    - งานต้องมี skill ที่ตรงกับ skills ของช่างรายนี้
+    - งานต้องอยู่ใน province ที่ช่างตั้งเป็นพื้นที่บริการ
+  filter เพิ่มเติมที่ใช้ได้:
+    - provinceId  : กรองจังหวัด
+    - skillId     : กรองสกิล
+    - level       : กรองระดับงาน
+    - budgetMax   : กรองงบประมาณสูงสุด
+    - q           : ค้นชื่อหรือรายละเอียดงาน
+  ข้อมูลต่อ 1 งาน:
+    - title, description (preview)
+    - jobLevel, budgetType, budgetAmount
+    - จังหวัด/อำเภอ
+    - applicationCount (มีคนสมัครแล้วกี่คน)
+    - viewCount
+    - expiresAt (หมดอายุเมื่อไหร่)
+  หน้าจอ:
+    - ฟีดหลัก (Home) แสดงงานที่ match
+    - แต่ละ card: ชื่องาน, ระดับ, งบ, พื้นที่, เวลาที่เหลือ
+    - กด card → ดูรายละเอียดงาน
+
+[3.7 ต่อ] ดูรายละเอียดงาน (จากมุมช่าง)
+  API    : GET /jobs/:id
+  ข้อมูลพิเศษสำหรับช่าง:
+    - myApplication = null (ยังไม่สมัคร) หรือ {id, status, proposedPrice}
+  หน้าจอ:
+    - แสดงรายละเอียดงาน
+    - ถ้า myApplication = null → ปุ่ม "สมัครงานนี้"
+    - ถ้า myApplication.status = "pending" → ปุ่ม "ถอนใบสมัคร"
+    - ถ้า myApplication.status = "accepted" → แสดง "ได้รับงาน!"
+    - ถ้า myApplication.status = "rejected" → แสดง "ไม่ได้รับเลือก"
+    - แสดง cost: งานนี้จะหักตั๋ว X ใบ
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 4 : สมัครงาน (Job Application)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[4.1-4.3] สมัครงาน
+  API    : POST /jobs/:id/apply
+  ข้อมูลที่รับ:
+    - proposedPrice: ราคาที่เสนอ (บาท)
+    - message      : ข้อความแนะนำตัวถึงลูกค้า (optional, max 500)
+  เงื่อนไข (server ตรวจทั้งหมด):
+    - งานต้อง status = "open"
+    - งานยังไม่หมดอายุ (expires_at > now)
+    - ยังไม่เคยสมัครงานนี้
+    - ตั๋วต้องพอ (ticketsBalance >= jobLevel)
+    - งาน Level 3+ ต้องผ่าน isVerified = true
+  การทำงาน:
+    - หักตั๋วอัตโนมัติ = jobLevel ใบ
+    - บันทึก transaction ว่าใช้ตั๋วสมัครงาน #X
+    - ส่ง notification ให้ลูกค้า "มีช่างใหม่สมัคร!"
+  Response:
+    - ticketsUsed      : ตั๋วที่ถูกหัก
+    - ticketsRemaining : ตั๋วที่เหลืออยู่
+  หน้าจอ:
+    - Bottom sheet / Dialog: ใส่ราคาที่เสนอ + ข้อความ
+    - แสดงเตือน: "จะหัก X ตั๋ว คงเหลือ Y ตั๋ว"
+    - ถ้าตั๋วไม่พอ → redirect ไปหน้าซื้อตั๋วก่อน
+
+[4.4] ถอนใบสมัคร (คืนตั๋ว)
+  API    : DELETE /jobs/:id/apply
+  เงื่อนไข:
+    - ถอนได้เฉพาะ status = "pending" (ยังรอตอบรับ)
+    - ถ้า "accepted" แล้ว → ถอนไม่ได้ (ต้องใช้ cancel match)
+  การทำงาน:
+    - เปลี่ยน application status → "withdrawn"
+    - คืนตั๋วทั้งหมดที่หักไป
+    - ลด applicationCount ของงานนั้น
+  หน้าจอ:
+    - ปุ่ม "ถอนใบสมัคร" → confirm → success
+    - แสดง "คืนตั๋ว X ใบแล้ว"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 5 : จัดการงานที่รับแล้ว (Match — ฝั่งช่าง)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[5.1-5.2] ดูรายการงานที่รับแล้ว
+  เหมือนฝั่งลูกค้า ต่างตรงที่:
+    - ดึงเฉพาะ match ที่ worker_id = ตัวเอง
+    - ได้เห็นชื่อ/เบอร์ลูกค้า
+
+[5.3] กดเริ่มงาน (สำคัญ!)
+  API    : PATCH /matches/:id/start
+  เงื่อนไข:
+    - ทำได้เฉพาะ role = worker
+    - status ต้องเป็น "matched"
+  การทำงาน:
+    - เปลี่ยน match status → "in_progress"
+    - เปลี่ยน job status → "in_progress"
+    - บันทึก started_at = ตอนนี้
+    - ส่ง notification ให้ลูกค้า "ช่างเริ่มงานแล้ว!"
+  หน้าจอ:
+    - ปุ่ม "เริ่มงาน" สีเขียว
+    - หลัง confirm → สถานะเปลี่ยนเป็น "กำลังดำเนินงาน"
+
+[5.4] ยกเลิกงาน (ฝั่งช่าง)
+  API    : PATCH /matches/:id/cancel
+  เหมือนฝั่งลูกค้า บันทึกว่า cancelled_by = worker
+  เงื่อนไข: ยกเลิกได้ตอน matched หรือ in_progress
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 6 : ระบบตั๋ว (Ticket System) — เฉพาะช่าง
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  *** ระบบตั๋วคือวิธีที่แพลตฟอร์มหารายได้จากช่าง ***
+  ช่างซื้อตั๋ว → ใช้ตั๋วสมัครงาน → ถ้าได้งานก็คุ้ม
+
+  วงจรตั๋ว:
+    ซื้อตั๋ว (purchase_add)
+      → ใช้สมัครงาน (application_deduct)
+        → ถ้าถอนใบสมัคร → คืนตั๋ว (admin_adjust)
+        → ถ้าได้งาน → ตั๋วหายไปเลย (ไม่คืน)
+
+[6.1-6.2] ดูยอดตั๋วและประวัติ
+  API    : GET /tickets
+  ข้อมูลที่ได้:
+    - balance      : ตั๋วคงเหลือ
+    - isVerified   : ผ่าน verify หรือยัง
+    - transactions[]: ประวัติ 30 รายการล่าสุด
+      - type: purchase_add / application_deduct / admin_adjust
+      - amount: +/- จำนวน
+      - balance_after: ยอดหลังทำรายการ
+      - note: รายละเอียด
+      - created_at
+  หน้าจอ:
+    - ยอดตั๋วใหญ่ตรงกลาง (เช่น 🎟️ 15 ตั๋ว)
+    - รายการธุรกรรมด้านล่าง (สีเขียว = ได้, สีแดง = หัก)
+
+[6.3] ดูแพ็คเกจตั๋ว
+  API    : GET /tickets/packages
+  ข้อมูลต่อ 1 แพ็คเกจ:
+    - name        : ชื่อแพ็ค เช่น "Starter Pack"
+    - description : รายละเอียด
+    - ticketCount : จำนวนตั๋ว
+    - price       : ราคา (บาท)
+    - validityDays: อายุตั๋ว (วัน)
+  หน้าจอ:
+    - การ์ดแพ็คเกจเรียงตาม price
+    - แสดง "ราคา X บาท / Y ตั๋ว = Z บาท/ตั๋ว"
+    - ปุ่ม "ซื้อเลย" แต่ละแพ็ค
+
+[6.4] ซื้อตั๋ว
+  API    : POST /tickets/purchase
+  ข้อมูลที่รับ:
+    - packageId    : ID แพ็คเกจที่เลือก
+    - paymentMethod: "promptpay" | "credit_card" | "bank_transfer" | "other"
+  *** สถานะปัจจุบัน (Dev Mode):
+    - ถ้า NODE_ENV != production → ได้ตั๋วทันทีโดยไม่ต้องจ่ายเงินจริง
+    - ใช้ทดสอบได้เลย
+  *** Production (อนาคต):
+    - ต้องเชื่อมกับ Payment Gateway (Omise / 2C2P)
+    - ได้รับ paymentId กลับมา → redirect ไปหน้าชำระเงิน
+    - หลังชำระ → gateway เรียก webhook → เติมตั๋วอัตโนมัติ
+  ผลลัพธ์ (dev):
+    - ตั๋วเข้าบัญชีทันที + push notification
+
+[6.5] ดูประวัติการชำระเงิน
+  API    : GET /tickets/payments
+  ข้อมูลต่อ 1 รายการ:
+    - ชื่อแพ็คเกจ, จำนวนตั๋ว
+    - จำนวนเงิน, วิธีชำระ, สถานะ
+    - วันที่ชำระ
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หมวด 7 : แชท และ การแจ้งเตือน (ฝั่งช่าง)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  เหมือนกันกับฝั่งลูกค้า (ดูรายละเอียดหมวด 6-7 ฝั่งลูกค้า)
+
+  ประเภท Notification ที่ช่างจะได้รับ:
+    match_accepted  = ยินดีด้วย! ลูกค้าเลือกคุณ
+    job_cancelled   = งานถูกยกเลิก
+    job_completed   = ลูกค้ายืนยันงานเสร็จ
+    rating_received = ได้รับคะแนน X ดาว!
+    ticket_purchase = ซื้อตั๋วสำเร็จ ได้รับ X ตั๋ว
+    new_message     = มีข้อความใหม่
+    verify_approved = 🎉 ยืนยันตัวตนสำเร็จ!  (🆕)
+    verify_rejected = คำขอยืนยันตัวตนไม่ผ่าน (🆕)
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ส่วนที่ 3 — ข้อมูลทางเทคนิคสำคัญ
+════════════════════════════════════════════════════════════════════════════════
+
+
+🆕 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  WebSocket — Real-time Chat & Notification
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ทำไมต้องใช้ WebSocket:
+    - แชทแบบ real-time โดยไม่ต้อง polling (ข้อความมาทันที)
+    - Notification popup ทันทีที่เกิดเหตุการณ์
+    - อัพเดต badge จำนวน unread ทันที
+
+  การเชื่อมต่อ:
+    URL: ws://localhost:9543/ws?token=<accessToken>
+    - ต้องแนบ access token ใน query string
+    - ถ้า token หมดอายุหรือผิด → server ปิด connection ด้วย code 4001
+
+  ตัวอย่างโค้ด JavaScript:
+    const ws = new WebSocket(`ws://localhost:9543/ws?token=${accessToken}`);
+
+    ws.onopen = () => console.log('WS connected');
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      switch (msg.type) {
+        case 'connected':
+          console.log('WS ready, userId:', msg.userId);
+          break;
+        case 'chat_message':
+          // ข้อความใหม่ในแชท
+          addMessageToRoom(msg.roomId, msg.message);
+          updateUnreadBadge();
+          break;
+        case 'notification':
+          // notification ใหม่
+          showNotificationToast(msg.title, msg.body);
+          incrementNotifBadge();
+          break;
+        case 'pong':
+          // heartbeat ตอบกลับ
+          break;
+      }
+    };
+
+    ws.onclose = (event) => {
+      if (event.code === 4001) {
+        // token หมดอายุ → ต้อง refresh แล้วเชื่อมใหม่
+        refreshTokenAndReconnect();
+      }
+    };
+
+    // Heartbeat: ส่ง ping ทุก 30 วิ ป้องกัน connection หลุด
+    setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+
+  Events ที่ server ส่งมา:
+    ┌──────────────────┬────────────────────────────────────────────────┐
+    │ type             │ เมื่อไหร่                                     │
+    ├──────────────────┼────────────────────────────────────────────────┤
+    │ connected        │ ทันทีที่เชื่อมต่อสำเร็จ                      │
+    │ chat_message     │ มีข้อความใหม่ในแชทห้องใด (ทั้งส่งและรับ)    │
+    │ notification     │ มี notification ใหม่ทุกชนิด                  │
+    │ pong             │ ตอบกลับ ping ของ client                       │
+    └──────────────────┴────────────────────────────────────────────────┘
+
+  chat_message payload:
+    {
+      "type"   : "chat_message",
+      "roomId" : 5,
+      "message": {
+        "id"         : 101,
+        "senderId"   : 12,
+        "messageType": "text",
+        "content"    : "สวัสดีครับ",
+        "imageUrl"   : null,
+        "createdAt"  : "2026-05-08T10:00:00Z"
+      }
+    }
+
+  notification payload:
+    {
+      "type"          : "notification",
+      "notificationId": 55,
+      "notifType"     : "new_application",
+      "title"         : "มีช่างสมัครงาน!",
+      "body"          : "ช่างสมชาย สมัครงาน 'ซ่อมประตู'",
+      "data"          : { "job_id": 7 },
+      "createdAt"     : "2026-05-08T10:00:00Z"
+    }
+
+  สิ่งสำคัญที่ต้องทำใน App:
+    1. เชื่อมต่อ WS ทันทีหลัง login สำเร็จ
+    2. ถ้า onclose code = 4001 → refresh token → สร้าง WS connection ใหม่
+    3. ถ้า onclose code อื่น → รอ 3-5 วิ แล้ว reconnect (exponential backoff)
+    4. ถ้า app เข้า background → ปิด WS ได้ (ใช้ Push Notification แทน)
+    5. ตอน WS offline: ยังส่งข้อความผ่าน POST /chat/:roomId ได้ปกติ
+       (Polling fallback: fetch GET /chat/:roomId ทุก 5 วิ ถ้า WS ไม่ได้เชื่อม)
+
+  Multi-device:
+    - User เดียวกันเชื่อมได้หลาย device พร้อมกัน
+    - server broadcast ไปทุก socket ของ userId นั้น
+    - เช่น login ทั้งมือถือและ tablet → ทั้งคู่รับข้อความได้
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Token Management (ต้องทำให้ถูกต้อง!)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Access Token:
+    - อายุ: ~15 นาที
+    - ส่งใน Header: Authorization: Bearer <token>
+    - ถ้าหมดอายุ → API ตอบ 401
+
+  Refresh Token:
+    - อายุ: 30 วัน
+    - ใช้ขอ access token ใหม่
+    - เมื่อใช้แล้ว token เก่าจะถูก revoke (Token Rotation)
+    - ต้องเซฟ refresh token ใหม่ทุกครั้งที่ refresh
+
+  Flow ที่แนะนำ:
+    1. เรียก API → ได้ 401
+    2. เรียก POST /auth/refresh พร้อม refreshToken
+    3. ได้ accessToken ใหม่ + refreshToken ใหม่
+    4. เซฟทั้งคู่
+    5. เรียก API เดิมซ้ำด้วย token ใหม่
+    6. ถ้า refresh ก็ 401 → logout บังคับ
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Error Response Format
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ทุก error ตอบในรูปแบบ:
+    {
+      "ok": false,
+      "error": {
+        "code"   : "error_code_snake_case",
+        "message": "ข้อความภาษาไทยสำหรับแสดงผู้ใช้"
+      }
+    }
+
+  HTTP Status ที่พบบ่อย:
+    400 Bad Request   = ข้อมูลที่ส่งไม่ถูกต้อง (validation error)
+    401 Unauthorized  = ไม่มี token หรือ token หมดอายุ
+    403 Forbidden     = มี token แต่ไม่มีสิทธิ์ (เช่น customer พยายามทำสิ่งที่เฉพาะ worker)
+    404 Not Found     = ไม่พบข้อมูลที่ร้องขอ
+    409 Conflict      = ข้อมูลซ้ำ (เช่น สมัครงานซ้ำ)
+    429 Too Many      = Rate limit เกิน
+    500 Server Error  = ข้อผิดพลาดฝั่ง server
+
+  Validation Error (400) มี format พิเศษ:
+    {
+      "ok": false,
+      "error": {
+        "code"  : "validation_error",
+        "fields": { "fieldName": "ข้อความ error" }
+      }
+    }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Flow ภาพรวมการใช้งาน (User Journey)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  === ลูกค้าหาช่าง (ผ่านประกาศงาน) ===
+    1. โพสงาน (POST /jobs)
+    2. รอช่างสมัคร → รับ notification "มีช่างสมัคร"
+    3. เข้าไปดูใบสมัคร (GET /jobs/:id/applications)
+    4. ดูโปรไฟล์ช่างที่สนใจ (GET /workers/:id)
+    5. เลือกช่าง (POST /jobs/:id/select/:appId)
+       → สร้าง match + chat room อัตโนมัติ
+    6. แชทกับช่างเพื่อนัดหมาย
+    7. รับ notification "ช่างเริ่มงานแล้ว"
+    8. ยืนยันงานเสร็จ (PATCH /matches/:id/complete)
+    9. ให้คะแนนช่าง (POST /ratings)
+
+  === ลูกค้าจ้างช่างโดยตรง ===
+    1. ค้นหาช่าง (GET /workers?skillId=...)
+    2. ดูโปรไฟล์ช่าง (GET /workers/:id)
+    3. กด "จ้างเลย" → กรอก Direct Hire form
+    4. POST /matches/direct
+       → สร้างงาน + match + chat room อัตโนมัติ
+    5. → ต่อจากข้อ 6 ด้านบน
+
+  === ช่างหางาน ===
+    1. ตั้งค่าโปรไฟล์: skills + areas (PUT ทั้งสองอย่าง)
+    2. ดูฟีดงาน (GET /jobs) — เห็นเฉพาะงานที่ match
+    3. กดดูงานที่สนใจ (GET /jobs/:id)
+    4. กด "สมัคร" → ใส่ราคา + message → ยืนยัน
+       → ตั๋วถูกหักอัตโนมัติ
+    5. รับ notification "คุณได้รับงาน!"
+    6. แชทกับลูกค้า
+    7. กดเริ่มงาน (PATCH /matches/:id/start)
+    8. ทำงาน → รับ notification "งานเสร็จสิ้น!"
+    9. รับ notification "ได้รับ X ดาว!"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  สรุปสิ่งที่ทำเสร็จแล้ว (ทุก Feature พร้อมใช้งาน)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✅ Email/Phone OTP Verification  — POST /verify/email/send, /confirm
+                                     POST /verify/phone/send, /confirm
+  ✅ Forgot / Reset Password       — POST /auth/forgot-password
+                                     POST /auth/reset-password
+  ✅ Worker ID Verification        — POST /workers/me/verify-id
+                                     GET  /workers/me/verify-id
+  ✅ Image Upload                  — POST /upload/image?purpose=...
+                                     DELETE /upload/:fileId
+  ✅ Report User/Job/Match         — POST /reports
+                                     GET  /reports/my
+  ✅ WebSocket Real-time           — ws://localhost:9543/ws?token=...
+  ✅ Customer Review History       — GET /ratings/customer/:customerId
+  ✅ Admin: Verify Requests        — GET/PATCH /api/admin/verify-requests
+  ✅ Admin: WS Stats               — GET /api/admin/ws-stats
+  ✅ Admin: Blacklist              — POST /api/admin/blacklist
+
+  สิ่งที่ยังไม่มี (TODO อนาคต):
+  [ ] Payment Gateway จริง  — Omise หรือ 2C2P (ตอนนี้ Dev Mode ได้ตั๋วฟรี)
+  [ ] Push Notification     — Firebase/APNs (Device token เก็บแล้ว รอ integrate)
+  [ ] Job Auto-expire       — Cron job หมดอายุงานหลัง 24 ชม.
+  [ ] Worker Near Me        — ค้นหาช่างใกล้เคียงด้วย GPS radius
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ไฟล์และตาราง DB ที่เพิ่มใหม่ (สำหรับ DBA / DevOps)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Migration: sql/002_new_features.sql
+    - worker_verifications  : คำขอ verify ช่าง (id_card_front/back, selfie_url, status)
+    - file_uploads          : record ไฟล์ที่อัพโหลด (user_id, url, purpose)
+    - reports               : รายงานผู้ใช้/งาน (reporter_id, target_type, reason, status)
+
+  ไฟล์ใหม่ใน src/:
+    - utils/mailer.js       : nodemailer + OTP email template (Ethereal ใน dev)
+    - utils/sms.js          : SMS (log ใน dev, Twilio/Thaibulksms ใน prod)
+    - utils/notify.js       : สร้าง notification + WebSocket push
+    - ws.js                 : WebSocket server (Map<userId, Set<ws>>)
+    - routes/verify.js      : /api/verify/email|phone send+confirm
+    - routes/upload.js      : /api/upload/image, DELETE
+    - routes/reports.js     : /api/reports POST+GET
+
+  โฟลเดอร์ uploads/:
+    - uploads/avatar/       : รูปโปรไฟล์
+    - uploads/chat/         : รูปในแชท
+    - uploads/verify_id/    : รูปบัตร verify
+    - uploads/other/        : อื่นๆ
+    - เข้าถึงผ่าน: GET /uploads/<purpose>/<filename>
+
+  ตัวแปร Environment ใหม่ (ใส่ใน .env):
+    SMTP_HOST=       # ถ้าว่าง → ใช้ Ethereal fake SMTP (dev)
+    SMTP_PORT=587
+    SMTP_USER=
+    SMTP_PASS=
+    SMTP_FROM="ChaungThai <noreply@chaungthai.co.th>"
+    SMS_PROVIDER=    # '' | 'twilio' | 'thaibulksms'  (ถ้าว่าง → log console)
+    SMS_ACCOUNT_SID= # Twilio
+    SMS_AUTH_TOKEN=  # Twilio
+    SMS_FROM=        # Twilio sender
+    SMS_KEY=         # Thaibulksms
+    SMS_SECRET=      # Thaibulksms
+    UPLOAD_BASE_URL= # ถ้าว่าง → ใช้ http://localhost:<port>
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ส่วนที่ 4 — ระบบภาษา (Internationalization / i18n)
+  รองรับ: ไทย (th) และ อังกฤษ (en)
+════════════════════════════════════════════════════════════════════════════════
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ภาพรวม — อะไรเป็นภาษาอะไร
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ┌─────────────────────────────┬───────────────────────────────────────────┐
+  │ ส่วน                        │ ภาษาที่ใช้                               │
+  ├─────────────────────────────┼───────────────────────────────────────────┤
+  │ UI / หน้าจอ                  │ ไทย หรือ อังกฤษ (user เลือกได้)         │
+  │ Error message จาก API        │ ตอบตาม Accept-Language header            │
+  │ Notification title/body      │ ตอบตาม lang ที่บันทึกไว้ใน profile      │
+  │ ข้อมูลที่ user พิมพ์เอง      │ ภาษาไหนก็ได้ (ไม่แปล)                  │
+  │ ชื่อสกิล / หมวดหมู่          │ ข้อมูลใน DB มีทั้ง th + en             │
+  │ ชื่อจังหวัด / อำเภอ          │ ข้อมูลใน DB มีทั้ง name_th + name_en   │
+  └─────────────────────────────┴───────────────────────────────────────────┘
+
+  หลักการ:
+    - "ข้อความ UI" → แปลใน frontend (i18n library)
+    - "ข้อมูลจาก DB" เช่น ชื่อสกิล/จังหวัด → API ส่ง field ทั้งสองภาษามาพร้อมกัน
+      แล้ว frontend เลือกแสดงตาม locale ที่ active อยู่
+    - "Error message จาก API" → ส่ง Accept-Language header ไปกับทุก request
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  การตั้งค่าภาษาของ User
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  เก็บภาษาที่เลือก 2 ที่:
+    1. localStorage / AsyncStorage  key = "ct_lang"  ค่า = "th" หรือ "en"
+       → ใช้ทันทีตอนเปิดแอพ (แม้ยังไม่ login)
+    2. User Profile ใน server  field = preferred_lang
+       → sync กลับมาตอน login (ถ้า server มี → override localStorage)
+       → ตอน logout → คง localStorage ไว้ (ไม่ reset)
+
+  API บันทึกภาษา:
+    PATCH /users/me
+    Body : { "preferredLang": "th" }   หรือ   { "preferredLang": "en" }
+    เรียกเมื่อ: user สลับภาษา → บันทึกทันที (ไม่ต้องกด save)
+
+  Login — sync ภาษาจาก server:
+    หลัง POST /auth/login หรือ GET /users/me สำเร็จ →
+    ถ้า user.preferredLang มีค่า → set locale ตามนั้น + อัพ localStorage
+    ถ้า user.preferredLang เป็น null → ใช้ค่าจาก localStorage เดิม
+
+  DB column ที่ต้องเพิ่ม (ถ้ายังไม่มี):
+    ALTER TABLE users ADD COLUMN preferred_lang ENUM('th','en') DEFAULT 'th';
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Accept-Language Header — บอก API ว่าอยากได้ภาษาอะไร
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ส่งใน HTTP header ทุก request:
+    Accept-Language: th       (ต้องการภาษาไทย)
+    Accept-Language: en       (ต้องการภาษาอังกฤษ)
+
+  ผลที่ได้:
+    - Error message ตอบเป็นภาษาที่ขอ
+    - Notification text ถูกสร้างในภาษาที่ถูกต้อง (ถ้า server รองรับ)
+    - ถ้าไม่ส่ง header → server ใช้ภาษาไทย (default)
+
+  ตัวอย่าง: ส่ง Accept-Language: en + login ผิดรหัสผ่าน →
+    { "error": { "code": "invalid_credentials",
+                 "message": "Incorrect email or password" } }
+
+  ตัวอย่าง: ส่ง Accept-Language: th + login ผิดรหัสผ่าน →
+    { "error": { "code": "invalid_credentials",
+                 "message": "อีเมลหรือรหัสผ่านไม่ถูกต้อง" } }
+
+  วิธีทำใน HTTP Client (ตัวอย่าง axios):
+    // สร้าง axios instance ที่ inject header อัตโนมัติ
+    import axios from 'axios';
+    import { getLang } from './i18n';   // function ดึง locale ปัจจุบัน
+
+    const api = axios.create({ baseURL: 'http://localhost:9543/api' });
+
+    api.interceptors.request.use(config => {
+      const token = localStorage.getItem('ct_access');
+      const lang  = getLang();  // 'th' หรือ 'en'
+      if (token) config.headers['Authorization'] = `Bearer ${token}`;
+      config.headers['Accept-Language'] = lang;
+      return config;
+    });
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ข้อมูล DB ที่มีสองภาษา (ชื่อสกิล / จังหวัด)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  API ส่งทั้งสอง field มาพร้อมกัน — frontend เลือกแสดงเอง
+
+  ชื่อสกิล (GET /skills):
+    {
+      "id"     : 3,
+      "nameTh" : "ช่างไฟฟ้า",
+      "nameEn" : "Electrician",
+      "slug"   : "electrician"
+    }
+  วิธีใช้:
+    const skillName = locale === 'th' ? skill.nameTh : skill.nameEn;
+
+  หมวดสกิล (GET /skills/categories):
+    {
+      "id"     : 1,
+      "nameTh" : "งานไฟฟ้า",
+      "nameEn" : "Electrical Work"
+    }
+
+  จังหวัด (GET /locations/provinces):
+    {
+      "id"     : 1,
+      "nameTh" : "กรุงเทพมหานคร",
+      "nameEn" : "Bangkok"
+    }
+
+  อำเภอ (GET /locations/districts):
+    {
+      "id"       : 1001,
+      "nameTh"   : "พระนคร",
+      "nameEn"   : "Phra Nakhon",
+      "province" : { "id": 1, "nameTh": "กรุงเทพมหานคร", "nameEn": "Bangkok" }
+    }
+
+  หมายเหตุ: ถ้า DB ยังมีแค่ภาษาไทย → เพิ่ม column name_en แล้ว migrate ข้อมูล
+    ตัวอย่าง SQL:
+      ALTER TABLE skills      ADD COLUMN name_en VARCHAR(100) AFTER name_th;
+      ALTER TABLE provinces   ADD COLUMN name_en VARCHAR(100) AFTER name_th;
+      ALTER TABLE districts   ADD COLUMN name_en VARCHAR(100) AFTER name_th;
+      ALTER TABLE subdistricts ADD COLUMN name_en VARCHAR(100) AFTER name_th;
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Frontend — วิธีทำ i18n ในแต่ละ Platform
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ── React / Next.js ──────────────────────────────────────────────────────────
+  Library: react-i18next   (npm install i18next react-i18next)
+
+  โครงสร้างไฟล์แนะนำ:
+    src/
+      locales/
+        th/
+          common.json     ← ปุ่ม, label ทั่วไป
+          auth.json       ← หน้า login/register
+          job.json        ← หน้าจัดการงาน
+          worker.json     ← หน้าโปรไฟล์ช่าง
+          errors.json     ← ข้อความ error ของ API (fallback)
+        en/
+          common.json
+          auth.json
+          job.json
+          worker.json
+          errors.json
+
+  ตัวอย่าง locales/th/common.json:
+    {
+      "btn_save"    : "บันทึก",
+      "btn_cancel"  : "ยกเลิก",
+      "btn_confirm" : "ยืนยัน",
+      "btn_submit"  : "ส่ง",
+      "btn_back"    : "กลับ",
+      "loading"     : "กำลังโหลด...",
+      "no_data"     : "ไม่มีข้อมูล",
+      "lang_switch" : "English"
+    }
+
+  ตัวอย่าง locales/en/common.json:
+    {
+      "btn_save"    : "Save",
+      "btn_cancel"  : "Cancel",
+      "btn_confirm" : "Confirm",
+      "btn_submit"  : "Submit",
+      "btn_back"    : "Back",
+      "loading"     : "Loading...",
+      "no_data"     : "No data",
+      "lang_switch" : "ภาษาไทย"
+    }
+
+  ตั้งค่า i18next (src/i18n.js):
+    import i18n from 'i18next';
+    import { initReactI18next } from 'react-i18next';
+    import th_common from './locales/th/common.json';
+    import en_common from './locales/en/common.json';
+    // ... import ทุก namespace
+
+    const savedLang = localStorage.getItem('ct_lang') || 'th';
+
+    i18n.use(initReactI18next).init({
+      resources: {
+        th: { common: th_common, auth: th_auth, ... },
+        en: { common: en_common, auth: en_auth, ... },
+      },
+      lng: savedLang,
+      fallbackLng: 'th',
+      defaultNS: 'common',
+      interpolation: { escapeValue: false },
+    });
+
+    export default i18n;
+    export const getLang = () => i18n.language;
+
+  ใช้ใน component:
+    import { useTranslation } from 'react-i18next';
+
+    function MyButton() {
+      const { t } = useTranslation('common');
+      return <button>{t('btn_save')}</button>;
+    }
+
+  สลับภาษา:
+    import i18n from '../i18n';
+
+    function switchLang() {
+      const next = i18n.language === 'th' ? 'en' : 'th';
+      i18n.changeLanguage(next);
+      localStorage.setItem('ct_lang', next);
+      api.patch('/users/me', { preferredLang: next });  // sync ไปที่ server
+    }
+
+  ── Flutter ──────────────────────────────────────────────────────────────────
+  ใช้ package: flutter_localizations + intl  หรือ  easy_localization
+
+  pubspec.yaml:
+    dependencies:
+      flutter_localizations:
+        sdk: flutter
+      easy_localization: ^3.0.0
+
+  โครงสร้างไฟล์:
+    assets/translations/
+      th.json
+      en.json
+
+  th.json ตัวอย่าง:
+    {
+      "btn_save"       : "บันทึก",
+      "btn_cancel"     : "ยกเลิก",
+      "home_title"     : "หน้าหลัก",
+      "job_post_title" : "โพสประกาศงาน",
+      "ticket_balance" : "ตั๋วคงเหลือ: {count} ใบ"
+    }
+
+  en.json ตัวอย่าง:
+    {
+      "btn_save"       : "Save",
+      "btn_cancel"     : "Cancel",
+      "home_title"     : "Home",
+      "job_post_title" : "Post a Job",
+      "ticket_balance" : "Tickets remaining: {count}"
+    }
+
+  สลับภาษา:
+    context.setLocale(Locale('en'));   // สลับเป็น EN
+    context.setLocale(Locale('th'));   // สลับเป็น TH
+
+  บันทึกลง shared_preferences + sync ไปที่ API เช่นเดิม
+
+  ── Vue / Nuxt ───────────────────────────────────────────────────────────────
+  Library: vue-i18n  (npm install vue-i18n@9)
+  โครงสร้างและ pattern เหมือน react-i18next ด้านบน ต่างที่ syntax:
+    const { t } = useI18n();
+    t('btn_save')
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ข้อความที่ต้องแปล — แบ่งตามหมวด
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [auth.json]
+  ┌──────────────────────────────┬──────────────────────────────┬────────────────────────────┐
+  │ Key                          │ ภาษาไทย                     │ English                    │
+  ├──────────────────────────────┼──────────────────────────────┼────────────────────────────┤
+  │ login_title                  │ เข้าสู่ระบบ                  │ Sign In                    │
+  │ register_title               │ สมัครสมาชิก                  │ Create Account             │
+  │ field_email                  │ อีเมล                        │ Email                      │
+  │ field_phone                  │ เบอร์โทรศัพท์                │ Phone Number               │
+  │ field_password               │ รหัสผ่าน                     │ Password                   │
+  │ field_confirm_password       │ ยืนยันรหัสผ่าน               │ Confirm Password           │
+  │ field_firstname              │ ชื่อ                         │ First Name                 │
+  │ field_lastname               │ นามสกุล                      │ Last Name                  │
+  │ btn_login                    │ เข้าสู่ระบบ                  │ Sign In                    │
+  │ btn_register                 │ สมัครสมาชิก                  │ Register                   │
+  │ btn_logout                   │ ออกจากระบบ                   │ Sign Out                   │
+  │ forgot_password              │ ลืมรหัสผ่าน?                 │ Forgot password?           │
+  │ forgot_title                 │ ลืมรหัสผ่าน                  │ Forgot Password            │
+  │ forgot_desc                  │ กรอกอีเมลหรือเบอร์โทรเพื่อรับ OTP │ Enter email or phone to receive OTP │
+  │ otp_title                    │ กรอกรหัส OTP                 │ Enter OTP Code             │
+  │ otp_sent_to                  │ ส่ง OTP ไปที่ {target}       │ OTP sent to {target}       │
+  │ otp_resend                   │ ส่งรหัสใหม่                  │ Resend Code                │
+  │ otp_resend_wait              │ ส่งใหม่ได้ในอีก {sec} วินาที │ Resend in {sec}s           │
+  │ reset_title                  │ ตั้งรหัสผ่านใหม่             │ Reset Password             │
+  │ field_new_password           │ รหัสผ่านใหม่                 │ New Password               │
+  │ accept_terms                 │ ฉันยอมรับ ข้อกำหนดและเงื่อนไข │ I agree to the Terms       │
+  └──────────────────────────────┴──────────────────────────────┴────────────────────────────┘
+
+  [job.json]
+  ┌──────────────────────────────┬──────────────────────────────┬────────────────────────────┐
+  │ Key                          │ ภาษาไทย                     │ English                    │
+  ├──────────────────────────────┼──────────────────────────────┼────────────────────────────┤
+  │ tab_all                      │ ทั้งหมด                      │ All                        │
+  │ tab_open                     │ เปิดรับ                      │ Open                       │
+  │ tab_in_progress              │ กำลังดำเนิน                  │ In Progress                │
+  │ tab_completed                │ เสร็จแล้ว                    │ Completed                  │
+  │ tab_expired                  │ หมดอายุ                      │ Expired                    │
+  │ tab_cancelled                │ ยกเลิกแล้ว                   │ Cancelled                  │
+  │ post_job_title               │ โพสประกาศงาน                 │ Post a Job                 │
+  │ field_job_title              │ ชื่องาน                      │ Job Title                  │
+  │ field_description            │ รายละเอียดงาน                │ Job Description            │
+  │ field_budget                 │ งบประมาณ                     │ Budget                     │
+  │ budget_fixed                 │ กำหนดราคา                    │ Fixed Price                │
+  │ budget_open                  │ ต่อรองได้                    │ Negotiable                 │
+  │ field_job_level              │ ระดับงาน                     │ Job Level                  │
+  │ level_desc_1                 │ งานเล็ก / ง่าย               │ Small / Easy               │
+  │ level_desc_2                 │ งานทั่วไป                    │ General Work               │
+  │ level_desc_3                 │ งานใหญ่                      │ Large Job                  │
+  │ level_desc_4                 │ งานซับซ้อน                   │ Complex Work               │
+  │ level_desc_5                 │ งานใหญ่มาก                   │ Very Large Project         │
+  │ ticket_cost_hint             │ หักตั๋ว {n} ใบเมื่อสมัคร    │ Costs {n} ticket(s) to apply │
+  │ applications_count           │ {n} คนสมัคร                  │ {n} applicant(s)           │
+  │ expires_in                   │ หมดอายุใน {time}             │ Expires in {time}          │
+  │ btn_apply                    │ สมัครงานนี้                   │ Apply for this Job         │
+  │ btn_withdraw                 │ ถอนใบสมัคร                   │ Withdraw Application       │
+  │ btn_select_worker            │ เลือกช่างนี้                 │ Select this Worker         │
+  │ btn_complete_job             │ ยืนยันงานเสร็จ               │ Confirm Completion         │
+  │ btn_cancel_job               │ ยกเลิกงาน                    │ Cancel Job                 │
+  │ btn_start_job                │ เริ่มงาน                     │ Start Job                  │
+  │ btn_direct_hire              │ จ้างเลย                      │ Hire Directly              │
+  │ cancel_reason_placeholder    │ กรุณาระบุเหตุผล              │ Please provide a reason    │
+  └──────────────────────────────┴──────────────────────────────┴────────────────────────────┘
+
+  [worker.json]
+  ┌──────────────────────────────┬──────────────────────────────┬────────────────────────────┐
+  │ Key                          │ ภาษาไทย                     │ English                    │
+  ├──────────────────────────────┼──────────────────────────────┼────────────────────────────┤
+  │ profile_title                │ โปรไฟล์ช่าง                  │ Worker Profile             │
+  │ field_bio                    │ แนะนำตัวเอง                  │ About Me                   │
+  │ skill_level_1                │ มือใหม่                      │ Beginner                   │
+  │ skill_level_2                │ พื้นฐาน                      │ Basic                      │
+  │ skill_level_3                │ ปานกลาง                      │ Intermediate               │
+  │ skill_level_4                │ ชำนาญ                        │ Advanced                   │
+  │ skill_level_5                │ เชี่ยวชาญ                    │ Expert                     │
+  │ price_type_fixed             │ ราคาคงที่                    │ Fixed Rate                 │
+  │ price_type_per_hour          │ รายชั่วโมง                   │ Per Hour                   │
+  │ price_type_negotiable        │ ต่อรองได้                    │ Negotiable                 │
+  │ verified_badge               │ ยืนยันแล้ว                   │ Verified                   │
+  │ not_verified                 │ ยังไม่ยืนยัน                 │ Not Verified               │
+  │ verify_title                 │ ยืนยันตัวตน                  │ Identity Verification      │
+  │ verify_pending               │ รอการตรวจสอบ                 │ Pending Review             │
+  │ verify_approved              │ ยืนยันตัวตนสำเร็จ ✓          │ Verified ✓                 │
+  │ verify_rejected              │ คำขอถูกปฏิเสธ                │ Request Rejected           │
+  │ verify_id_front              │ รูปบัตรประชาชน (ด้านหน้า)   │ ID Card (Front)            │
+  │ verify_id_back               │ รูปบัตรประชาชน (ด้านหลัง)   │ ID Card (Back)             │
+  │ verify_selfie                │ รูป Selfie ถือบัตร           │ Selfie with ID Card        │
+  │ ticket_balance               │ ตั๋วคงเหลือ                  │ Tickets Remaining          │
+  │ btn_buy_tickets              │ ซื้อตั๋ว                     │ Buy Tickets                │
+  │ ticket_pack_value            │ {count} ตั๋ว ราคา {price} บาท │ {count} tickets for ฿{price} │
+  └──────────────────────────────┴──────────────────────────────┴────────────────────────────┘
+
+  [chat.json]
+  ┌──────────────────────────────┬──────────────────────────────┬────────────────────────────┐
+  │ Key                          │ ภาษาไทย                     │ English                    │
+  ├──────────────────────────────┼──────────────────────────────┼────────────────────────────┤
+  │ chat_title                   │ ข้อความ                      │ Messages                   │
+  │ input_placeholder            │ พิมพ์ข้อความ...              │ Type a message...          │
+  │ btn_send                     │ ส่ง                          │ Send                       │
+  │ btn_attach_image             │ แนบรูปภาพ                    │ Attach Image               │
+  │ room_locked                  │ ห้องนี้ถูกปิดแล้ว            │ This chat is closed        │
+  │ no_messages                  │ ยังไม่มีข้อความ              │ No messages yet            │
+  │ unread_badge                 │ {n} ข้อความใหม่              │ {n} new message(s)         │
+  └──────────────────────────────┴──────────────────────────────┴────────────────────────────┘
+
+  [notifications.json]
+  ┌────────────────────────┬────────────────────────────────────┬───────────────────────────────────┐
+  │ notifType              │ title (th)                         │ title (en)                        │
+  ├────────────────────────┼────────────────────────────────────┼───────────────────────────────────┤
+  │ new_application        │ มีช่างใหม่สมัครงาน!               │ New worker applied!               │
+  │ match_accepted         │ ยินดีด้วย! คุณได้รับงาน!          │ Congratulations! Job accepted!    │
+  │ job_started            │ ช่างเริ่มงานแล้ว                   │ Worker has started the job        │
+  │ job_completed          │ งานเสร็จสิ้น!                      │ Job completed!                    │
+  │ job_cancelled          │ งานถูกยกเลิก                       │ Job cancelled                     │
+  │ rating_received        │ ได้รับรีวิว {stars} ดาว!          │ You received a {stars}-star review │
+  │ new_message            │ ข้อความใหม่จาก {name}             │ New message from {name}           │
+  │ ticket_purchase        │ ได้รับตั๋ว {count} ใบแล้ว!        │ Received {count} ticket(s)!       │
+  │ verify_approved        │ ยืนยันตัวตนสำเร็จ! 🎉              │ Identity verified! 🎉              │
+  │ verify_rejected        │ คำขอยืนยันตัวตนไม่ผ่าน            │ Verification request rejected     │
+  └────────────────────────┴────────────────────────────────────┴───────────────────────────────────┘
+
+  [errors.json]  ← fallback กรณี API ไม่ได้ส่ง message กลับมา
+  ┌────────────────────────────┬────────────────────────────────┬───────────────────────────────────┐
+  │ code                       │ ภาษาไทย                       │ English                           │
+  ├────────────────────────────┼────────────────────────────────┼───────────────────────────────────┤
+  │ invalid_credentials        │ อีเมลหรือรหัสผ่านไม่ถูกต้อง  │ Incorrect email or password       │
+  │ user_exists                │ อีเมล/เบอร์โทรนี้มีอยู่แล้ว  │ Email/phone already registered    │
+  │ token_expired              │ เซสชันหมดอายุ กรุณา login ใหม่ │ Session expired, please sign in  │
+  │ already_verified           │ ยืนยันแล้ว ไม่ต้องทำซ้ำ      │ Already verified                  │
+  │ invalid_otp                │ รหัส OTP ไม่ถูกต้อง           │ Invalid OTP code                  │
+  │ otp_expired                │ รหัส OTP หมดอายุ              │ OTP code has expired              │
+  │ otp_max_attempts           │ ลองผิดเกินกำหนด ขอรหัสใหม่   │ Too many attempts, request new OTP │
+  │ not_enough_tickets         │ ตั๋วไม่พอ กรุณาซื้อเพิ่ม     │ Not enough tickets                │
+  │ job_expired                │ ประกาศงานหมดอายุแล้ว          │ Job listing has expired           │
+  │ already_applied            │ สมัครงานนี้ไปแล้ว             │ Already applied for this job      │
+  │ not_verified               │ ต้องยืนยันตัวตนก่อน          │ Identity verification required    │
+  │ file_too_large             │ ไฟล์ใหญ่เกิน 5MB             │ File exceeds 5MB limit            │
+  │ invalid_type               │ ไฟล์ประเภทนี้ไม่รองรับ       │ File type not supported           │
+  │ rate_limit                 │ ทำบ่อยเกินไป กรุณารอสักครู่  │ Too many requests, please wait    │
+  │ network_error              │ ไม่สามารถเชื่อมต่อได้         │ Connection error                  │
+  │ server_error               │ เกิดข้อผิดพลาด กรุณาลองใหม่  │ Server error, please try again    │
+  └────────────────────────────┴────────────────────────────────┴───────────────────────────────────┘
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  หน้าจอ "ตั้งค่าภาษา" (Language Settings Screen)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  เข้าถึงได้จาก: Settings → ภาษา / Language
+
+  UI ที่ต้องสร้าง:
+    ┌─────────────────────────────────┐
+    │  ภาษา / Language                │
+    │                                 │
+    │  ○ ภาษาไทย        [✓ เลือกอยู่] │
+    │  ○ English                      │
+    │                                 │
+    └─────────────────────────────────┘
+
+  เมื่อกดเลือก:
+    1. เปลี่ยน locale ทันที (UI อัพเดตแบบ instant ไม่ต้อง reload)
+    2. บันทึก localStorage.setItem('ct_lang', 'en')
+    3. ถ้า login อยู่ → PATCH /users/me { preferredLang: 'en' }
+
+  ทางลัด: วาง toggle ไว้บน navbar / drawer ก็ได้
+    ปุ่ม: [TH | EN] สลับไปมา
+
+  *** อย่าลืมทำ: ตัวเลข / วันที่ ต้องแปลง locale ด้วย ***
+    - ภาษาไทย: วันที่แบบไทย  "8 พ.ค. 2569"  ตัวเลขไทย optional
+    - ภาษาอังกฤษ: "May 8, 2026"
+    ใช้ Intl.DateTimeFormat หรือ dayjs/moment พร้อม locale
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Checklist ก่อน release ระบบภาษา
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Frontend:
+  [ ] ติดตั้ง i18n library (react-i18next / easy_localization / vue-i18n)
+  [ ] สร้างไฟล์ th.json และ en.json ครบทุก namespace
+  [ ] ไม่มี hardcoded string ภาษาไทยหรืออังกฤษใน component โดยตรง
+  [ ] ปุ่มสลับภาษาทำงานได้ + บันทึก localStorage
+  [ ] ตัวเลข / วันที่ใช้ locale-aware format
+  [ ] Notification toast แสดงภาษาถูกต้อง
+  [ ] Error message แสดงจาก i18n key (ไม่แสดง raw error จาก API ตรงๆ)
+
+  API / Backend:
+  [ ] ทุก request ส่ง Accept-Language header
+  [ ] Column preferred_lang ใน table users
+  [ ] GET /users/me ส่ง preferredLang กลับมา
+  [ ] GET /skills ส่ง nameTh + nameEn
+  [ ] GET /locations/* ส่ง nameTh + nameEn
+  [ ] Error message รองรับทั้ง th และ en (ถ้า backend implement)
+
+  DB:
+  [ ] skills.name_en มีข้อมูลครบ
+  [ ] provinces.name_en มีข้อมูลครบ
+  [ ] districts.name_en มีข้อมูลครบ
+  [ ] subdistricts.name_en มีข้อมูลครบ (หรือใช้แค่จังหวัด/อำเภอก็พอ)
+
+
+================================================================================
+  END OF DOCUMENT  (ฉบับ 2 — อัพเดต 2026-05-08)
+================================================================================

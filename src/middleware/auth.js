@@ -10,7 +10,7 @@ function requireAuth(req, _res, next) {
     }
     try {
         const payload = verifyAccessToken(token);
-        req.user = { id: payload.sub, role: payload.role };
+        req.user = { id: parseInt(payload.sub, 10), role: payload.role };
         next();
     } catch (err) {
         next(err);

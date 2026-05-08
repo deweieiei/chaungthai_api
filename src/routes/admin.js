@@ -41,7 +41,7 @@ router.get('/stats', asyncHandler(async (_req, res) => {
     db.query(`SELECT COUNT(*) AS pending FROM reports WHERE status = 'pending'`),
   ]);
 
-  res.json({ ok: true, data: { users: users[0], jobs: jobs[0], matches: matches[0], reports: reports[0] } });
+  res.json({ ok: true, data: { users, jobs, matches, reports } });
 }));
 
 // GET /api/admin/users
@@ -215,6 +215,89 @@ router.get('/audit', asyncHandler(async (req, res) => {
     { ...params, limit, offset: (page - 1) * limit }
   );
   res.json({ ok: true, data: logs, page, limit });
+}));
+
+// ── GET /api/admin/verify-requests ── รายการคำขอ verify ช่าง ────────────
+router.get('/verify-requests', asyncHandler(async (req, res) => {
+  const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit  = Math.min(50, parseInt(req.query.limit, 10) || 20);
+  const status = req.query.status || 'pending';
+
+  const rows = await db.query(
+    `SELECT wv.id, wv.worker_id, wv.status, wv.reject_reason,
+            wv.id_card_front, wv.id_card_back, wv.selfie_url,
+            wv.created_at, wv.reviewed_at,
+            u.first_name, u.last_name, u.email, u.phone,
+            wp.rating_avg, wp.rating_count
+     FROM worker_verifications wv
+     JOIN users u  ON u.id  = wv.worker_id
+     JOIN worker_profiles wp ON wp.user_id = wv.worker_id
+     WHERE wv.status = :status
+     ORDER BY wv.created_at ASC
+     LIMIT :limit OFFSET :offset`,
+    { status, limit, offset: (page - 1) * limit }
+  );
+  res.json({ ok: true, data: rows, page, limit });
+}));
+
+// ── PATCH /api/admin/verify-requests/:id ── อนุมัติ/ปฏิเสธ ──────────────
+const verifyDecisionSchema = z.object({
+  decision:     z.enum(['approved', 'rejected']),
+  rejectReason: z.string().trim().max(500).optional(),
+});
+
+router.patch(
+  '/verify-requests/:id',
+  validate({ body: verifyDecisionSchema }),
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const { decision, rejectReason } = req.body;
+
+    const request = await db.queryOne(
+      `SELECT * FROM worker_verifications WHERE id = :id AND status = 'pending'`,
+      { id }
+    );
+    if (!request) throw errors.notFound('not_found', 'ไม่พบคำขอหรือถูกตรวจสอบแล้ว');
+    if (decision === 'rejected' && !rejectReason) {
+      throw errors.badRequest('missing_reason', 'กรุณาระบุเหตุผลที่ปฏิเสธ');
+    }
+
+    await db.withTransaction(async (conn) => {
+      await conn.execute(
+        `UPDATE worker_verifications
+         SET status = ?, reject_reason = ?, reviewed_by = ?, reviewed_at = NOW(), updated_at = NOW()
+         WHERE id = ?`,
+        [decision, rejectReason || null, req.user.id, id]
+      );
+      if (decision === 'approved') {
+        await conn.execute(
+          `UPDATE worker_profiles SET is_verified = 1, verified_at = NOW(), updated_at = NOW() WHERE user_id = ?`,
+          [request.worker_id]
+        );
+        await conn.execute(
+          `INSERT INTO notifications (user_id, type, title, body, data) VALUES (?, 'verify_approved', ?, ?, ?)`,
+          [request.worker_id, '🎉 ยืนยันตัวตนสำเร็จ!',
+           'บัญชีของคุณได้รับการยืนยันแล้ว คุณสามารถรับงานทุกระดับได้',
+           JSON.stringify({ request_id: id })]
+        );
+      } else {
+        await conn.execute(
+          `INSERT INTO notifications (user_id, type, title, body, data) VALUES (?, 'verify_rejected', ?, ?, ?)`,
+          [request.worker_id, 'คำขอยืนยันตัวตนไม่ผ่าน',
+           `เหตุผล: ${(rejectReason || '').slice(0, 100)}`,
+           JSON.stringify({ request_id: id, reason: rejectReason })]
+        );
+      }
+    });
+
+    res.json({ ok: true, message: decision === 'approved' ? 'อนุมัติแล้ว' : 'ปฏิเสธแล้ว' });
+  })
+);
+
+// ── GET /api/admin/ws-stats ── จำนวน WebSocket connections ───────────────
+router.get('/ws-stats', asyncHandler(async (_req, res) => {
+  const wsModule = require('../ws');
+  res.json({ ok: true, data: wsModule.stats() });
 }));
 
 // POST /api/admin/blacklist

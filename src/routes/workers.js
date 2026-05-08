@@ -243,6 +243,71 @@ router.put('/me/location', validate({ body: locationSchema }), asyncHandler(asyn
   res.json({ ok: true, message: 'อัพเดทพิกัดสำเร็จ' });
 }));
 
+// ── POST /api/workers/me/verify-id ── ส่งเอกสารยืนยันตัวตน ───────────────
+const verifyIdSchema = z.object({
+  idCardFront: z.string().url().max(500),
+  idCardBack:  z.string().url().max(500).optional().nullable(),
+  selfieUrl:   z.string().url().max(500).optional().nullable(),
+});
+
+router.post('/me/verify-id', validate({ body: verifyIdSchema }), asyncHandler(async (req, res) => {
+  const wid = req.user.id;
+
+  // เช็คว่า verified แล้วหรือยัง
+  const wp = await db.queryOne('SELECT is_verified FROM worker_profiles WHERE user_id = :id', { id: wid });
+  if (!wp) throw errors.notFound('profile_not_found', 'ไม่พบโปรไฟล์ช่าง');
+  if (wp.is_verified) {
+    return res.json({ ok: true, message: 'ผ่านการยืนยันตัวตนแล้ว' });
+  }
+
+  // เช็คว่ามี request pending อยู่แล้วหรือยัง
+  const pending = await db.queryOne(
+    `SELECT id FROM worker_verifications WHERE worker_id = :id AND status = 'pending'`,
+    { id: wid }
+  );
+  if (pending) {
+    throw errors.conflict('verify_pending', 'คำขอยืนยันตัวตนของคุณอยู่ระหว่างการตรวจสอบ');
+  }
+
+  const { idCardFront, idCardBack, selfieUrl } = req.body;
+  const [r] = await db.pool.execute(
+    `INSERT INTO worker_verifications (worker_id, id_card_front, id_card_back, selfie_url)
+     VALUES (?, ?, ?, ?)`,
+    [wid, idCardFront, idCardBack || null, selfieUrl || null]
+  );
+
+  res.status(201).json({
+    ok:       true,
+    message:  'ส่งคำขอยืนยันตัวตนแล้ว ทีมงานจะตรวจสอบภายใน 1-2 วันทำการ',
+    requestId: r.insertId,
+  });
+}));
+
+// ── GET /api/workers/me/verify-id ── ดูสถานะคำขอ ──────────────────────────
+router.get('/me/verify-id', asyncHandler(async (req, res) => {
+  const wid = req.user.id;
+  const wp = await db.queryOne(
+    'SELECT is_verified, verified_at FROM worker_profiles WHERE user_id = :id',
+    { id: wid }
+  );
+
+  const latest = await db.queryOne(
+    `SELECT id, status, reject_reason, created_at, reviewed_at
+     FROM worker_verifications WHERE worker_id = :id
+     ORDER BY created_at DESC LIMIT 1`,
+    { id: wid }
+  );
+
+  res.json({
+    ok: true,
+    data: {
+      isVerified:  !!wp?.is_verified,
+      verifiedAt:  wp?.verified_at || null,
+      latestRequest: latest || null,
+    },
+  });
+}));
+
 // GET /api/workers/me/stats
 router.get('/me/stats', asyncHandler(async (req, res) => {
   const id = req.user.id;

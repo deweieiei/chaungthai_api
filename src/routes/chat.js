@@ -4,6 +4,7 @@ const db = require('../db');
 const { errors, asyncHandler } = require('../utils/http');
 const { requireAuth } = require('../middleware/auth');
 const validate = require('../middleware/validate');
+const ws = require('../ws');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -133,6 +134,22 @@ router.post(
     );
 
     const msg = await db.queryOne('SELECT * FROM chat_messages WHERE id = :id', { id: msgId });
+
+    // ── WebSocket: push ข้อความแบบ real-time ให้ทั้งสองฝ่าย ──────────────
+    const wsPayload = {
+      type:       'chat_message',
+      roomId,
+      message: {
+        id:          msg.id,
+        senderId:    msg.sender_id,
+        messageType: msg.message_type,
+        content:     msg.content,
+        imageUrl:    msg.image_url,
+        createdAt:   msg.created_at,
+      },
+    };
+    ws.broadcastMany([uid, otherId], wsPayload);
+
     res.status(201).json({ ok: true, data: msg });
   })
 );

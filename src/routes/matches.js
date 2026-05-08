@@ -3,6 +3,7 @@ const { z } = require('zod');
 const db = require('../db');
 const { errors, asyncHandler } = require('../utils/http');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { createNotification } = require('../utils/notify');
 const validate = require('../middleware/validate');
 
 const router = express.Router();
@@ -90,8 +91,8 @@ router.patch('/:id/start', requireRole('worker'), asyncHandler(async (req, res) 
 
   // notify customer
   const job = await db.queryOne('SELECT title, customer_id FROM jobs WHERE id = :id', { id: match.job_id });
-  await createNotification(job.customer_id, 'job_started', 'ช่างเริ่มงานแล้ว',
-    `ช่างเริ่มดำเนินงาน "${job.title.slice(0, 50)}" แล้ว`, { match_id: id });
+  await createNotification({ userId: job.customer_id, type: 'job_started', title: 'ช่างเริ่มงานแล้ว',
+    body: `ช่างเริ่มดำเนินงาน "${job.title.slice(0, 50)}" แล้ว`, data: { match_id: id } });
 
   res.json({ ok: true, message: 'เริ่มงานแล้ว' });
 }));
@@ -238,15 +239,5 @@ router.post(
     res.status(201).json({ ok: true, message: 'ส่งงานให้ช่างแล้ว', ...result });
   })
 );
-
-// helper reused above
-async function createNotification(userId, type, title, body, data) {
-  try {
-    await db.query(
-      `INSERT INTO notifications (user_id, type, title, body, data) VALUES (:uid, :type, :title, :body, :data)`,
-      { uid: userId, type, title, body, data: JSON.stringify(data) }
-    );
-  } catch (e) { console.error('[notify]', e.message); }
-}
 
 module.exports = router;

@@ -1,10 +1,12 @@
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
+const path    = require('path');
+const cors    = require('cors');
+const helmet  = require('helmet');
 
-const config = require('./src/config');
-const db = require('./src/db');
+const config  = require('./src/config');
+const db      = require('./src/db');
 const errorMw = require('./src/middleware/error');
+const ws      = require('./src/ws');
 
 // Routes
 const healthRoute        = require('./src/routes/health');
@@ -20,6 +22,9 @@ const ratingsRoute       = require('./src/routes/ratings');
 const ticketsRoute       = require('./src/routes/tickets');
 const notificationsRoute = require('./src/routes/notifications');
 const adminRoute         = require('./src/routes/admin');
+const verifyRoute        = require('./src/routes/verify');
+const uploadRoute        = require('./src/routes/upload');
+const reportsRoute       = require('./src/routes/reports');
 
 const app = express();
 
@@ -28,8 +33,15 @@ app.set('trust proxy', 1);
 
 // Security headers (XSS, clickjacking, MIME-sniff, etc.)
 app.use(helmet({
-    contentSecurityPolicy: false,         // API only, no HTML — CSP not needed
+    contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+// ── Static files: serve uploaded images ─────────────────────────────────
+// GET /uploads/<purpose>/<filename>
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
+    maxAge: '7d',
+    immutable: false,
 }));
 
 // Body parser
@@ -70,6 +82,9 @@ app.use('/api/ratings',       ratingsRoute);
 app.use('/api/tickets',       ticketsRoute);
 app.use('/api/notifications', notificationsRoute);
 app.use('/api/admin',         adminRoute);
+app.use('/api/verify',        verifyRoute);
+app.use('/api/upload',        uploadRoute);
+app.use('/api/reports',       reportsRoute);
 
 // 404 + error handlers (must be last)
 app.use(errorMw.notFound);
@@ -79,7 +94,12 @@ app.use(errorMw.handler);
 const server = app.listen(config.port, () => {
     console.log(`[api] listening on http://localhost:${config.port} (${config.env})`);
     console.log(`[api] DB: ${config.db.user}@${config.db.host}:${config.db.port}/${config.db.database}`);
+    console.log(`[api] Uploads dir: ${path.join(process.cwd(), 'uploads')}`);
 });
+
+// ── WebSocket server (real-time chat + notifications) ────────────────────
+// Client เชื่อมต่อผ่าน ws://localhost:<port>/ws?token=<accessToken>
+ws.setup(server);
 
 // Graceful shutdown
 function shutdown(signal) {

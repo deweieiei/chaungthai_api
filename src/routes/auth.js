@@ -6,9 +6,11 @@ const rateLimit = require('express-rate-limit');
 const config = require('../config');
 const db = require('../db');
 const { errors, asyncHandler } = require('../utils/http');
-const { signAccessToken, signRefreshToken, verifyRefreshToken, sha256 } = require('../utils/tokens');
+const { signAccessToken, signRefreshToken, verifyRefreshToken, sha256, randomCode } = require('../utils/tokens');
 const { requireAuth } = require('../middleware/auth');
 const validate = require('../middleware/validate');
+const { sendMail, otpEmailHtml } = require('../utils/mailer');
+const { sendSMS } = require('../utils/sms');
 
 const router = express.Router();
 
@@ -253,6 +255,142 @@ router.get(
         const user = await db.queryOne('SELECT * FROM users WHERE id = :id', { id: req.user.id });
         if (!user) throw errors.notFound('user_not_found', 'ไม่พบผู้ใช้');
         res.json({ ok: true, user: publicUser(user) });
+    })
+);
+
+// ── Rate limit สำหรับ forgot password ────────────────────────────────────
+const forgotLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: { ok: false, error: { code: 'too_many_requests', message: 'ลองใหม่ใน 15 นาที' } },
+});
+
+const OTP_EXPIRES_MIN  = 10;
+const OTP_MAX_ATTEMPTS = 5;
+
+// ---- POST /api/auth/forgot-password ----
+const forgotSchema = z.object({
+    identifier: z.string().trim().min(5).max(255),   // email หรือ phone
+});
+
+router.post(
+    '/forgot-password',
+    forgotLimiter,
+    validate({ body: forgotSchema }),
+    asyncHandler(async (req, res) => {
+        const { identifier } = req.body;
+        const user = await db.queryOne(
+            `SELECT id, email, phone FROM users WHERE (email = :id OR phone = :id) AND is_active = 1`,
+            { id: identifier.toLowerCase() }
+        );
+
+        // ตอบ ok เสมอ → ไม่เผย user มีอยู่หรือไม่ (กัน enumeration)
+        if (!user) {
+            return res.json({ ok: true, message: 'ถ้าบัญชีนี้มีอยู่ คุณจะได้รับรหัส OTP เร็วๆ นี้' });
+        }
+
+        // Invalidate OTP เก่า
+        await db.query(
+            `UPDATE otp_codes SET used_at = NOW()
+              WHERE user_id = :uid AND purpose = 'reset_password' AND used_at IS NULL`,
+            { uid: user.id }
+        );
+
+        const code      = randomCode(6);
+        const codeHash  = sha256(code);
+        const expiresAt = new Date(Date.now() + OTP_EXPIRES_MIN * 60 * 1000);
+        const target    = identifier.includes('@') ? user.email : user.phone;
+
+        await db.query(
+            `INSERT INTO otp_codes (user_id, target, code_hash, purpose, expires_at)
+             VALUES (:uid, :target, :hash, 'reset_password', :exp)`,
+            { uid: user.id, target, hash: codeHash, exp: expiresAt }
+        );
+
+        // ส่ง OTP ทาง Email หรือ SMS
+        if (target === user.email) {
+            await sendMail({
+                to:      user.email,
+                subject: `[ChaungThai] รหัส OTP รีเซ็ตรหัสผ่าน: ${code}`,
+                html:    otpEmailHtml(code, 'reset_password', OTP_EXPIRES_MIN),
+            });
+        } else {
+            await sendSMS({
+                to:   user.phone,
+                body: `[ChaungThai] รหัส OTP รีเซ็ตรหัสผ่าน: ${code} (${OTP_EXPIRES_MIN} นาที)`,
+            });
+        }
+
+        if (process.env.NODE_ENV !== 'production') {
+            console.log(`[auth] DEV forgot-password OTP for user ${user.id}: ${code}`);
+        }
+
+        await logAudit(user.id, 'forgot_password_request', req, { target });
+        res.json({ ok: true, message: 'ถ้าบัญชีนี้มีอยู่ คุณจะได้รับรหัส OTP เร็วๆ นี้' });
+    })
+);
+
+// ---- POST /api/auth/reset-password ----
+const resetSchema = z.object({
+    identifier:  z.string().trim().min(5).max(255),
+    code:        z.string().length(6).regex(/^\d{6}$/),
+    newPassword: z.string().min(8).max(100)
+                   .regex(/[A-Za-z]/, 'ต้องมีตัวอักษร')
+                   .regex(/[0-9]/,    'ต้องมีตัวเลข'),
+});
+
+router.post(
+    '/reset-password',
+    validate({ body: resetSchema }),
+    asyncHandler(async (req, res) => {
+        const { identifier, code, newPassword } = req.body;
+
+        const user = await db.queryOne(
+            `SELECT id, email, phone FROM users WHERE (email = :id OR phone = :id) AND is_active = 1`,
+            { id: identifier.toLowerCase() }
+        );
+        if (!user) throw errors.badRequest('invalid_otp', 'รหัส OTP ไม่ถูกต้องหรือหมดอายุ');
+
+        const target = identifier.includes('@') ? user.email : user.phone;
+
+        // หา OTP ที่ยังใช้ได้
+        const otpRow = await db.queryOne(
+            `SELECT * FROM otp_codes
+              WHERE user_id = :uid AND target = :target
+                AND purpose = 'reset_password'
+                AND used_at IS NULL AND expires_at > NOW()
+              ORDER BY created_at DESC LIMIT 1`,
+            { uid: user.id, target }
+        );
+        if (!otpRow) throw errors.badRequest('invalid_otp', 'รหัส OTP ไม่ถูกต้องหรือหมดอายุ');
+
+        if (otpRow.attempts >= OTP_MAX_ATTEMPTS) {
+            throw errors.badRequest('otp_too_many_attempts', 'กรอกรหัสผิดเกินกำหนด กรุณาขอ OTP ใหม่');
+        }
+
+        await db.query(
+            `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = :id`,
+            { id: otpRow.id }
+        );
+
+        if (sha256(code) !== otpRow.code_hash) {
+            const rem = OTP_MAX_ATTEMPTS - (otpRow.attempts + 1);
+            throw errors.badRequest('invalid_otp', `OTP ไม่ถูกต้อง (เหลือ ${Math.max(0, rem)} ครั้ง)`);
+        }
+
+        // OTP ถูก → mark used + เปลี่ยนรหัสผ่าน + revoke tokens
+        const newHash = await bcrypt.hash(newPassword, config.bcryptRounds);
+        await db.withTransaction(async (conn) => {
+            await conn.execute(`UPDATE otp_codes SET used_at = NOW() WHERE id = ?`, [otpRow.id]);
+            await conn.execute(`UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?`, [newHash, user.id]);
+            await conn.execute(
+                `UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL`,
+                [user.id]
+            );
+        });
+
+        await logAudit(user.id, 'reset_password_success', req);
+        res.json({ ok: true, message: 'รีเซ็ตรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบใหม่' });
     })
 );
 
