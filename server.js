@@ -15,6 +15,7 @@ require('./src/db');
 // import routes
 const authRoutes = require('./src/routes/auth');
 const userRoutes = require('./src/routes/users');
+const skillRoutes = require('./src/routes/skills');
 
 // สร้าง app
 const app = express();
@@ -47,6 +48,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 //  → GET  /api/users/:user_id
 //  → PUT  /api/users/:user_id  (auth required)
+app.use('/api/skills', skillRoutes);
+//  → GET  /api/skills  (tree: category -> subcategory -> skill)
 
 // ============================================================
 //  404 handler (ทุก route ที่ไม่ match ข้างบน)
