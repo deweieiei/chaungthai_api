@@ -13,25 +13,53 @@ const { verifyToken } = require('../middleware/auth');
 
 const router = express.Router();
 
+// ตั๋วเริ่มต้นตอนสมัครเป็นช่าง
+const DEFAULT_JOB_TICKETS = 25;
+
 // ============================================================
 //  POST /api/workers
-//  สมัครเป็นช่าง:
-//    - ใช้ user_id จาก JWT (ไม่ต้องส่งใน body)
-//    - INSERT worker_chaungthai + UPDATE user_role = 'worker'
-//    - เป็นช่างซ้ำ -> 409
+//  สมัครเป็นช่าง (1 transaction รวมทุกอย่าง):
+//    1. INSERT worker_chaungthai (resume + tickets=25)
+//    2. INSERT workerskill_chaungthai (skill_ids ที่เลือก) - ถ้ามี
+//    3. UPDATE user_chaungthai SET user_role='worker'
+//
+//  Body:
+//    {
+//      "worker_resume": "ประวัติ ประสบการณ์..." (optional),
+//      "skill_ids": [1, 11, 13]                (optional, max 50)
+//    }
+//
+//  สมัครซ้ำ -> 409
 // ============================================================
 router.post('/', verifyToken, async (req, res) => {
   const userId = req.user.user_id;
   const body = req.body || {};
-  const worker_resume = typeof body.worker_resume === 'string' && body.worker_resume.trim() !== ''
-    ? body.worker_resume.trim()
-    : null;
+
+  // --- 1) parse + validate input ---
+  const worker_resume =
+    typeof body.worker_resume === 'string' && body.worker_resume.trim() !== ''
+      ? body.worker_resume.trim()
+      : null;
+
+  let uniqueSkillIds = [];
+  if (body.skill_ids !== undefined && body.skill_ids !== null) {
+    if (!Array.isArray(body.skill_ids)) {
+      return res.status(400).json({ error: 'skill_ids ต้องเป็น array' });
+    }
+    uniqueSkillIds = [...new Set(body.skill_ids.map((x) => Number(x)))];
+    if (uniqueSkillIds.some((x) => !Number.isInteger(x) || x < 1)) {
+      return res.status(400).json({ error: 'skill_ids ต้องเป็นจำนวนเต็มบวก' });
+    }
+    if (uniqueSkillIds.length > 50) {
+      return res.status(400).json({ error: 'เลือกสกิลไม่เกิน 50 รายการ' });
+    }
+  }
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
 
-    // 1. เช็คว่าเป็นช่างอยู่แล้วไหม
+    // --- 2) เช็คซ้ำ ---
     const [existing] = await conn.execute(
       'SELECT worker_id FROM worker_chaungthai WHERE worker_user_id = ? LIMIT 1',
       [userId]
@@ -44,16 +72,49 @@ router.post('/', verifyToken, async (req, res) => {
       });
     }
 
-    // 2. INSERT worker_chaungthai
+    // --- 3) validate skill_ids มีจริง + active ---
+    if (uniqueSkillIds.length > 0) {
+      const placeholders = uniqueSkillIds.map(() => '?').join(',');
+      const [exists] = await conn.query(
+        `SELECT skill_id FROM skill_chaungthai
+          WHERE skill_id IN (${placeholders}) AND skill_is_active = 1`,
+        uniqueSkillIds
+      );
+      if (exists.length !== uniqueSkillIds.length) {
+        await conn.rollback();
+        const foundIds = exists.map((r) => r.skill_id);
+        const missingIds = uniqueSkillIds.filter((x) => !foundIds.includes(x));
+        return res.status(400).json({
+          error: 'มี skill_id บางตัวไม่มีในระบบหรือถูกปิดใช้',
+          missing_skill_ids: missingIds,
+        });
+      }
+    }
+
+    // --- 4) INSERT worker_chaungthai (resume + tickets=25) ---
     const [result] = await conn.execute(
       `INSERT INTO worker_chaungthai
-        (worker_user_id, worker_resume)
-       VALUES (?, ?)`,
-      [userId, worker_resume]
+        (worker_user_id, worker_resume, worker_job_tickets)
+       VALUES (?, ?, ?)`,
+      [userId, worker_resume, DEFAULT_JOB_TICKETS]
     );
     const newWorkerId = result.insertId;
 
-    // 3. UPDATE user_role = 'worker'
+    // --- 5) INSERT workerskill_chaungthai (ถ้าส่ง skills มา) ---
+    if (uniqueSkillIds.length > 0) {
+      const values = uniqueSkillIds.map(() => '(?, ?)').join(', ');
+      const params = [];
+      for (const sid of uniqueSkillIds) {
+        params.push(newWorkerId, sid);
+      }
+      await conn.query(
+        `INSERT INTO workerskill_chaungthai
+          (workerskill_worker_id, workerskill_skill_id) VALUES ${values}`,
+        params
+      );
+    }
+
+    // --- 6) UPDATE user_role = 'worker' ---
     await conn.execute(
       `UPDATE user_chaungthai SET user_role = 'worker' WHERE user_id = ?`,
       [userId]
@@ -66,8 +127,10 @@ router.post('/', verifyToken, async (req, res) => {
       worker_id: newWorkerId,
       worker_user_id: userId,
       worker_resume,
-      worker_job_tickets: 0,
+      worker_job_tickets: DEFAULT_JOB_TICKETS,
       worker_total_jobs: 0,
+      skill_count: uniqueSkillIds.length,
+      skill_ids: uniqueSkillIds,
     });
   } catch (err) {
     await conn.rollback();
