@@ -14,6 +14,7 @@ require('./src/db');
 
 // import routes
 const authRoutes = require('./src/routes/auth');
+const userRoutes = require('./src/routes/users');
 
 // สร้าง app
 const app = express();
@@ -42,6 +43,10 @@ app.get('/api/health', (req, res) => {
 // ============================================================
 app.use('/api/auth', authRoutes);
 //  → POST /api/auth/register
+//  → POST /api/auth/login
+app.use('/api/users', userRoutes);
+//  → GET  /api/users/:user_id
+//  → PUT  /api/users/:user_id  (auth required)
 
 // ============================================================
 //  404 handler (ทุก route ที่ไม่ match ข้างบน)
