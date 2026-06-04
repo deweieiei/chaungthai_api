@@ -3,11 +3,17 @@
 //  Created: 2026-06-04
 // ============================================================
 
-// โหลด environment variables จากไฟล์ .env
+// โหลด environment variables จากไฟล์ .env (ต้องอยู่บรรทัดแรกสุด)
 require('dotenv').config();
 
 // import express framework
 const express = require('express');
+
+// โหลด DB pool (จะลอง connect ตอน start - เห็นผลใน log)
+require('./src/db');
+
+// import routes
+const authRoutes = require('./src/routes/auth');
 
 // สร้าง app
 const app = express();
@@ -29,6 +35,19 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime_seconds: Math.floor(process.uptime()),
   });
+});
+
+// ============================================================
+//  Mount routes
+// ============================================================
+app.use('/api/auth', authRoutes);
+//  → POST /api/auth/register
+
+// ============================================================
+//  404 handler (ทุก route ที่ไม่ match ข้างบน)
+// ============================================================
+app.use((req, res) => {
+  res.status(404).json({ error: 'ไม่พบ endpoint นี้', path: req.path });
 });
 
 // ============================================================
