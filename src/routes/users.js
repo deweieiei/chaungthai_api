@@ -19,6 +19,7 @@ const router = express.Router();
 const PUBLIC_FIELDS = `
   user_id, user_name, user_lastname, user_email, user_image,
   user_phone, user_birthday, user_address, user_bio,
+  user_province_id, user_district_id, user_subdistrict_id,
   user_role, user_status,
   user_email_verified_at, user_phone_verified_at, user_identity_verified_at,
   user_created_at, user_updated_at, user_last_login_at
@@ -35,7 +36,67 @@ const UPDATABLE_FIELDS = [
   'user_address',
   'user_image',
   'user_bio',
+  'user_province_id',
+  'user_district_id',
+  'user_subdistrict_id',
 ];
+
+// field ที่เป็น location id (จะ validate type + parent-child match)
+const LOCATION_ID_FIELDS = ['user_province_id', 'user_district_id', 'user_subdistrict_id'];
+
+/**
+ * ตรวจสอบ location ids:
+ * - ทุก id ที่ส่งมาต้องเป็น integer
+ * - ถ้าส่งหลาย id มาด้วยกัน parent-child ต้องตรง
+ * - id ต้องมีอยู่ใน DB
+ *
+ * Return { ok: true } หรือ { ok: false, error: '...' }
+ */
+async function validateLocationIds(pool, ids) {
+  const { user_province_id: p, user_district_id: d, user_subdistrict_id: s } = ids;
+
+  // 1. ตรวจ type
+  for (const k of LOCATION_ID_FIELDS) {
+    if (ids[k] !== undefined && ids[k] !== null) {
+      if (!Number.isInteger(ids[k]) || ids[k] < 1) {
+        return { ok: false, error: `${k} ต้องเป็นจำนวนเต็มบวก` };
+      }
+    }
+  }
+
+  // 2. ตรวจ exists + parent-child
+  if (p !== undefined && p !== null) {
+    const [r] = await pool.execute(
+      'SELECT 1 FROM location_province_chaungthai WHERE province_id = ?',
+      [p]
+    );
+    if (r.length === 0) return { ok: false, error: 'user_province_id ไม่พบในระบบ' };
+  }
+
+  if (d !== undefined && d !== null) {
+    const [r] = await pool.execute(
+      'SELECT district_province_id FROM location_district_chaungthai WHERE district_id = ?',
+      [d]
+    );
+    if (r.length === 0) return { ok: false, error: 'user_district_id ไม่พบในระบบ' };
+    if (p !== undefined && p !== null && r[0].district_province_id !== p) {
+      return { ok: false, error: 'user_district_id ไม่อยู่ใน user_province_id ที่เลือก' };
+    }
+  }
+
+  if (s !== undefined && s !== null) {
+    const [r] = await pool.execute(
+      'SELECT subdistrict_district_id FROM location_subdistrict_chaungthai WHERE subdistrict_id = ?',
+      [s]
+    );
+    if (r.length === 0) return { ok: false, error: 'user_subdistrict_id ไม่พบในระบบ' };
+    if (d !== undefined && d !== null && r[0].subdistrict_district_id !== d) {
+      return { ok: false, error: 'user_subdistrict_id ไม่อยู่ใน user_district_id ที่เลือก' };
+    }
+  }
+
+  return { ok: true };
+}
 
 // ความยาวสูงสุดของแต่ละ field (ตาม schema DB)
 const FIELD_MAX_LEN = {
@@ -113,8 +174,16 @@ router.put('/:user_id', verifyToken, async (req, res) => {
     for (const key of Object.keys(body)) {
       if (UPDATABLE_FIELDS.includes(key)) {
         let val = body[key];
-        // string: trim, ถ้าว่าง -> null (สำหรับ "clear" field)
-        if (typeof val === 'string') {
+        // location id: รับเป็น number หรือ string ตัวเลข -> แปลงเป็น number
+        if (LOCATION_ID_FIELDS.includes(key)) {
+          if (val === null || val === '') {
+            val = null;
+          } else {
+            const n = Number(val);
+            val = Number.isFinite(n) ? n : val; // ถ้าแปลงไม่ได้ปล่อยให้ validate ทีหลัง reject
+          }
+        } else if (typeof val === 'string') {
+          // string: trim, ถ้าว่าง -> null (สำหรับ "clear" field)
           val = val.trim();
           if (val === '') val = null;
         }
@@ -157,6 +226,14 @@ router.put('/:user_id', verifyToken, async (req, res) => {
         return res.status(400).json({
           error: 'รูปแบบ user_birthday ต้องเป็น YYYY-MM-DD',
         });
+      }
+    }
+
+    // ตรวจ location ids (type + exists + parent-child)
+    if (LOCATION_ID_FIELDS.some((k) => k in fieldsToUpdate)) {
+      const v = await validateLocationIds(pool, fieldsToUpdate);
+      if (!v.ok) {
+        return res.status(400).json({ error: v.error });
       }
     }
 

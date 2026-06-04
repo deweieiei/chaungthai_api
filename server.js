@@ -16,6 +16,8 @@ require('./src/db');
 const authRoutes = require('./src/routes/auth');
 const userRoutes = require('./src/routes/users');
 const skillRoutes = require('./src/routes/skills');
+const locationRoutes = require('./src/routes/locations');
+const workerRoutes = require('./src/routes/workers');
 
 // สร้าง app
 const app = express();
@@ -50,6 +52,14 @@ app.use('/api/users', userRoutes);
 //  → PUT  /api/users/:user_id  (auth required)
 app.use('/api/skills', skillRoutes);
 //  → GET  /api/skills  (tree: category -> subcategory -> skill)
+app.use('/api/locations', locationRoutes);
+//  → GET  /api/locations/provinces
+//  → GET  /api/locations/districts?province_id=X
+//  → GET  /api/locations/subdistricts?district_id=X
+app.use('/api/workers', workerRoutes);
+//  → POST /api/workers              (auth required)
+//  → PUT  /api/workers/:id/skills   (auth + owner)
+//  → GET  /api/workers/search       (public)
 
 // ============================================================
 //  404 handler (ทุก route ที่ไม่ match ข้างบน)
