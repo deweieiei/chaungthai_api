@@ -8,6 +8,7 @@ require('dotenv').config();
 
 // import express framework
 const express = require('express');
+const cors = require('cors');
 
 // โหลด DB pool (จะลอง connect ตอน start - เห็นผลใน log)
 require('./src/db');
@@ -24,6 +25,32 @@ const app = express();
 
 // อ่าน PORT จาก .env ถ้าไม่มีใช้ 3000
 const PORT = process.env.PORT || 3000;
+
+// ============================================================
+//  CORS (Cross-Origin Resource Sharing)
+//  ให้ web ที่อยู่คนละ origin (เช่น :8086) เรียก API ที่ :443 ได้
+//  อ่าน whitelist จาก env CORS_ORIGINS (comma separated) หรือ allow all ถ้าไม่ตั้ง
+// ============================================================
+const corsOriginsEnv = process.env.CORS_ORIGINS;
+let corsOptions;
+if (corsOriginsEnv && corsOriginsEnv.trim() !== '') {
+  const whitelist = corsOriginsEnv.split(',').map((s) => s.trim()).filter(Boolean);
+  corsOptions = {
+    origin: (origin, callback) => {
+      // ไม่มี origin (เช่น curl, Postman, mobile app) -> อนุญาต
+      if (!origin) return callback(null, true);
+      if (whitelist.includes(origin)) return callback(null, true);
+      return callback(new Error('CORS: origin not allowed -> ' + origin));
+    },
+    credentials: true,
+  };
+  console.log('[CORS] whitelist:', whitelist);
+} else {
+  // dev / ยังไม่ได้ตั้ง -> เปิดทั้งหมด
+  corsOptions = { origin: true, credentials: true };
+  console.log('[CORS] allow all origins (CORS_ORIGINS not set)');
+}
+app.use(cors(corsOptions));
 
 // บอก express ให้ parse JSON body ของ request ได้
 app.use(express.json());
