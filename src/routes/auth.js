@@ -11,8 +11,14 @@ const { verifyToken } = require('../middleware/auth');
 
 const router = express.Router();
 
-// helper: ตรวจ NODE_ENV
-const isDev = () => process.env.NODE_ENV !== 'production';
+// helper: เปิด mock tokens (verify_url, otp_code, reset_token) ใน response ไหม
+// - default: เปิดถ้า NODE_ENV ไม่ใช่ production
+// - override ด้วย env EXPOSE_MOCK_TOKENS=true (สำหรับ MVP ที่ยังไม่ได้ต่อ email/SMS gateway)
+const exposeMockTokens = () =>
+  String(process.env.EXPOSE_MOCK_TOKENS).toLowerCase() === 'true' ||
+  process.env.NODE_ENV !== 'production';
+
+const isDev = exposeMockTokens; // alias สำหรับโค้ดเดิม
 
 // helper: random 6 digit OTP
 function generate6DigitOtp() {
