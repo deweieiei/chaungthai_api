@@ -5,6 +5,7 @@
 //  POST /api/workers              - สมัครเป็นช่าง (login + ยังไม่เป็นช่าง)
 //  PUT  /api/workers/:id/skills   - เลือกสกิลของช่าง (replace mode)
 //  GET  /api/workers/search       - ค้นหาช่างตามสกิล + พื้นที่
+//  GET  /api/workers/:id          - รายละเอียดช่างคนเดียว (skills+portfolio)
 // ============================================================
 
 const express = require('express');
@@ -359,6 +360,127 @@ router.get('/search', async (req, res) => {
     });
   } catch (err) {
     console.error('[workers/search] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  }
+});
+
+// ============================================================
+//  GET /api/workers/:worker_id
+//  รายละเอียดช่างคนเดียว (สาธารณะ - ไม่ต้อง login)
+//    - worker + user info (ไม่รวม password/national_id)
+//    - skills array
+//    - portfolio images (max 20)
+//  *** Hide ถ้า user_status != 'Active' ***
+// ============================================================
+router.get('/:worker_id', async (req, res) => {
+  try {
+    const workerId = Number(req.params.worker_id);
+    if (!Number.isInteger(workerId) || workerId < 1) {
+      return res.status(400).json({ error: 'worker_id ไม่ถูกต้อง' });
+    }
+
+    // ----- 1. worker + user (active only) -----
+    const [workers] = await pool.execute(
+      `SELECT
+          w.worker_id, w.worker_user_id,
+          w.worker_resume, w.worker_job_tickets, w.worker_total_jobs,
+          w.worker_crime_checked_at, w.worker_created_at,
+          u.user_id, u.user_name, u.user_lastname, u.user_email,
+          u.user_image, u.user_phone, u.user_bio,
+          u.user_province_id, u.user_district_id, u.user_subdistrict_id,
+          u.user_address, u.user_status, u.user_role,
+          u.user_email_verified_at, u.user_phone_verified_at,
+          u.user_identity_verified_at,
+          p.province_name_th, p.province_name_en,
+          d.district_name_th, d.district_name_en,
+          s.subdistrict_name_th, s.subdistrict_name_en, s.subdistrict_zip_code
+        FROM worker_chaungthai w
+        JOIN user_chaungthai u ON u.user_id = w.worker_user_id
+        LEFT JOIN location_province_chaungthai p ON p.province_id = u.user_province_id
+        LEFT JOIN location_district_chaungthai d ON d.district_id = u.user_district_id
+        LEFT JOIN location_subdistrict_chaungthai s ON s.subdistrict_id = u.user_subdistrict_id
+        WHERE w.worker_id = ?
+          AND u.user_status = 'Active'
+        LIMIT 1`,
+      [workerId]
+    );
+    if (workers.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบช่างที่ระบุ' });
+    }
+    const w = workers[0];
+
+    // ----- 2. skills (active only) -----
+    const [skills] = await pool.execute(
+      `SELECT sk.skill_id, sk.skill_name_th, sk.skill_name_en,
+              sub.skill_subcategory_id, sub.skill_subcategory_name_th,
+              cat.skill_category_id, cat.skill_category_name_th
+         FROM workerskill_chaungthai ws
+         JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
+         LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+         LEFT JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
+        WHERE ws.workerskill_worker_id = ?
+          AND sk.skill_is_active = 1
+        ORDER BY cat.skill_category_id, sub.skill_subcategory_id, sk.skill_id`,
+      [workerId]
+    );
+
+    // ----- 3. portfolio images -----
+    const [images] = await pool.execute(
+      `SELECT worker_resume_image_id, worker_resume_image_url,
+              worker_resume_image_order, worker_resume_image_caption,
+              worker_resume_image_uploaded_at
+         FROM worker_resume_image_chaungthai
+        WHERE worker_resume_image_worker_id = ?
+        ORDER BY worker_resume_image_order`,
+      [workerId]
+    );
+
+    // ----- 4. response -----
+    return res.json({
+      worker: {
+        worker_id: w.worker_id,
+        worker_user_id: w.worker_user_id,
+        worker_resume: w.worker_resume,
+        worker_job_tickets: w.worker_job_tickets,
+        worker_total_jobs: w.worker_total_jobs,
+        worker_crime_checked_at: w.worker_crime_checked_at,
+        worker_created_at: w.worker_created_at,
+      },
+      user: {
+        user_id: w.user_id,
+        user_name: w.user_name,
+        user_lastname: w.user_lastname,
+        user_email: w.user_email,
+        user_image: w.user_image,
+        user_phone: w.user_phone,
+        user_bio: w.user_bio,
+        user_address: w.user_address,
+        user_province_id: w.user_province_id,
+        user_district_id: w.user_district_id,
+        user_subdistrict_id: w.user_subdistrict_id,
+        user_status: w.user_status,
+        user_role: w.user_role,
+        user_email_verified_at: w.user_email_verified_at,
+        user_phone_verified_at: w.user_phone_verified_at,
+        user_identity_verified_at: w.user_identity_verified_at,
+      },
+      location: {
+        province_name_th: w.province_name_th,
+        province_name_en: w.province_name_en,
+        district_name_th: w.district_name_th,
+        district_name_en: w.district_name_en,
+        subdistrict_name_th: w.subdistrict_name_th,
+        subdistrict_name_en: w.subdistrict_name_en,
+        zip_code: w.subdistrict_zip_code,
+      },
+      skills,
+      portfolio_images: images,
+    });
+  } catch (err) {
+    console.error('[workers][GET :id] error:', err);
     return res.status(500).json({
       error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
       detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,

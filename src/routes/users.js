@@ -10,6 +10,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcrypt');
 const multer = require('multer');
 const pool = require('../db');
 const { verifyToken } = require('../middleware/auth');
@@ -408,5 +409,117 @@ router.post(
     }
   }
 );
+
+// ============================================================
+//  PATCH /api/users/:user_id/password
+//  เปลี่ยนรหัสผ่าน (auth + เจ้าของ + ต้องรู้รหัสเก่า)
+//  Body: { old_password, new_password }
+// ============================================================
+router.patch('/:user_id/password', verifyToken, async (req, res) => {
+  try {
+    const userId = parseUserId(req, res);
+    if (userId === null) return;
+
+    if (req.user.user_id !== userId) {
+      return res.status(403).json({ error: 'ไม่อนุญาตให้แก้รหัสผ่านของผู้อื่น' });
+    }
+
+    const { old_password, new_password } = req.body || {};
+    if (!old_password || !new_password) {
+      return res.status(400).json({ error: 'กรุณาส่ง old_password + new_password' });
+    }
+    if (typeof new_password !== 'string' || new_password.length < 8) {
+      return res.status(400).json({ error: 'new_password ต้องมีอย่างน้อย 8 ตัวอักษร' });
+    }
+    if (old_password === new_password) {
+      return res.status(400).json({ error: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับของเดิม' });
+    }
+
+    // ดึง hash ปัจจุบัน
+    const [rows] = await pool.execute(
+      'SELECT user_password FROM user_chaungthai WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    if (rows.length === 0 || !rows[0].user_password) {
+      return res.status(400).json({ error: 'ไม่พบรหัสผ่านในระบบ' });
+    }
+
+    // ตรวจ old
+    const match = await bcrypt.compare(old_password, rows[0].user_password);
+    if (!match) {
+      return res.status(401).json({ error: 'รหัสผ่านเดิมไม่ถูกต้อง' });
+    }
+
+    // hash + update
+    const rounds = Number(process.env.BCRYPT_ROUNDS) || 12;
+    const newHash = await bcrypt.hash(new_password, rounds);
+    await pool.execute(
+      'UPDATE user_chaungthai SET user_password = ? WHERE user_id = ?',
+      [newHash, userId]
+    );
+    return res.json({ message: 'เปลี่ยนรหัสผ่านสำเร็จ' });
+  } catch (err) {
+    console.error('[users][PATCH password] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  }
+});
+
+// ============================================================
+//  DELETE /api/users/:user_id
+//  ปิดบัญชี (auth + เจ้าของ + ต้องยืนยันด้วย password)
+//  Soft delete: user_status = 'Closed'
+//  Body: { password: "รหัสปัจจุบัน" }
+// ============================================================
+router.delete('/:user_id', verifyToken, async (req, res) => {
+  try {
+    const userId = parseUserId(req, res);
+    if (userId === null) return;
+
+    if (req.user.user_id !== userId) {
+      return res.status(403).json({ error: 'ไม่อนุญาตให้ปิดบัญชีของผู้อื่น' });
+    }
+
+    const { password } = req.body || {};
+    if (!password) {
+      return res.status(400).json({ error: 'กรุณายืนยันด้วยรหัสผ่านปัจจุบัน' });
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT user_password, user_status FROM user_chaungthai WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+    if (rows[0].user_status === 'Closed') {
+      return res.status(409).json({ error: 'บัญชีถูกปิดอยู่แล้ว' });
+    }
+    if (!rows[0].user_password) {
+      return res.status(400).json({ error: 'ไม่พบรหัสผ่านในระบบ' });
+    }
+
+    const match = await bcrypt.compare(password, rows[0].user_password);
+    if (!match) {
+      return res.status(401).json({ error: 'รหัสผ่านไม่ถูกต้อง' });
+    }
+
+    await pool.execute(
+      `UPDATE user_chaungthai SET user_status = 'Closed' WHERE user_id = ?`,
+      [userId]
+    );
+    return res.json({
+      message: 'ปิดบัญชีสำเร็จ — ข้อมูลของคุณยังอยู่แต่จะไม่ปรากฏในระบบ',
+      user_id: userId,
+      user_status: 'Closed',
+    });
+  } catch (err) {
+    console.error('[users][DELETE] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  }
+});
 
 module.exports = router;
