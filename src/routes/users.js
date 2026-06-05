@@ -2,15 +2,56 @@
 //  Users Routes
 //  Mounted at: /api/users
 //
-//  GET  /api/users/:user_id  - ดูโปรไฟล์ (ไม่ต้อง login)
-//  PUT  /api/users/:user_id  - อัปเดตโปรไฟล์ (login + เจ้าของเท่านั้น)
+//  GET  /api/users/:user_id        - ดูโปรไฟล์ (ไม่ต้อง login)
+//  PUT  /api/users/:user_id        - อัปเดตโปรไฟล์ (login + เจ้าของ)
+//  POST /api/users/:user_id/image  - อัปโหลดรูปโปรไฟล์ (login + เจ้าของ)
 // ============================================================
 
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const pool = require('../db');
 const { verifyToken } = require('../middleware/auth');
 
 const router = express.Router();
+
+// ------------------------------------------------------------
+//  Multer config สำหรับ upload รูปโปรไฟล์
+//  เก็บใน UPLOADS_DIR/avatars/ (default <project>/uploads/avatars)
+//  serve กลับผ่าน server.js: app.use('/api/uploads', express.static(UPLOADS_DIR))
+// ------------------------------------------------------------
+const UPLOADS_DIR =
+  process.env.UPLOADS_DIR || path.join(__dirname, '../../uploads');
+const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
+fs.mkdirSync(AVATARS_DIR, { recursive: true });
+
+const UPLOAD_MAX = Number(process.env.UPLOAD_MAX_BYTES) || 5 * 1024 * 1024;
+
+const avatarStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, AVATARS_DIR),
+  filename: (req, file, cb) => {
+    let ext = path.extname(file.originalname || '').toLowerCase();
+    if (!['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
+      // map MIME -> ext เผื่อ originalname ไม่มี ext
+      const map = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+      ext = map[file.mimetype] || '.jpg';
+    }
+    const userId = (req.user && req.user.user_id) || 'anon';
+    const ts = Date.now();
+    cb(null, `avatar_${userId}_${ts}${ext}`);
+  },
+});
+
+const avatarUpload = multer({
+  storage: avatarStorage,
+  limits: { fileSize: UPLOAD_MAX },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('รองรับเฉพาะไฟล์ jpg/png/webp'));
+  },
+});
 
 // ------------------------------------------------------------
 //  Field ที่ส่งกลับใน response (ตัด sensitive ออก)
@@ -274,5 +315,98 @@ router.put('/:user_id', verifyToken, async (req, res) => {
     });
   }
 });
+
+// ============================================================
+//  POST /api/users/:user_id/image
+//  อัปโหลดรูปโปรไฟล์ (login + เจ้าของเท่านั้น)
+//  - รับ multipart/form-data, field name = "image"
+//  - ขนาด <= UPLOAD_MAX (default 5MB)
+//  - MIME: jpg/png/webp เท่านั้น
+//  - save filename: avatar_<user_id>_<timestamp>.<ext>
+//  - update DB: user_image = "/api/uploads/avatars/<filename>"
+//  - ลบรูปเก่า (ถ้ามีและอยู่ใน /api/uploads/)
+// ============================================================
+router.post(
+  '/:user_id/image',
+  verifyToken,
+  (req, res, next) => {
+    // ใช้ middleware แบบ wrapped เพื่อ handle multer error เอง
+    avatarUpload.single('image')(req, res, (err) => {
+      if (err) {
+        // multer error (file too big, MIME ไม่ผ่าน, ฯลฯ)
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const userId = parseUserId(req, res);
+      if (userId === null) {
+        if (req.file) fs.unlink(req.file.path, () => {});
+        return;
+      }
+
+      // ต้องเป็นเจ้าของ
+      if (req.user.user_id !== userId) {
+        if (req.file) fs.unlink(req.file.path, () => {});
+        return res.status(403).json({
+          error: 'ไม่อนุญาตให้แก้ไขโปรไฟล์ของผู้อื่น',
+        });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'กรุณาแนบไฟล์รูปที่ field "image"',
+        });
+      }
+
+      const publicUrl = `/api/uploads/avatars/${req.file.filename}`;
+
+      // ดึงรูปเก่ามาเพื่อลบทีหลัง (ถ้าเป็นไฟล์ที่ upload ไว้บน server)
+      const [oldRows] = await pool.execute(
+        'SELECT user_image FROM user_chaungthai WHERE user_id = ?',
+        [userId]
+      );
+      const oldImage = oldRows[0]?.user_image || null;
+
+      // update DB
+      const [result] = await pool.execute(
+        'UPDATE user_chaungthai SET user_image = ? WHERE user_id = ?',
+        [publicUrl, userId]
+      );
+      if (result.affectedRows === 0) {
+        // user หาย -> ลบไฟล์ที่เพิ่งอัปโหลด
+        fs.unlink(req.file.path, () => {});
+        return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+      }
+
+      // ลบรูปเก่าถ้าเก็บใน server (path เริ่มด้วย /api/uploads/avatars/)
+      if (oldImage && oldImage.startsWith('/api/uploads/avatars/')) {
+        const oldFile = path.join(AVATARS_DIR, path.basename(oldImage));
+        // safety: ต้องอยู่ใน AVATARS_DIR เท่านั้น
+        if (oldFile.startsWith(AVATARS_DIR + path.sep)) {
+          fs.unlink(oldFile, () => {}); // silent (ถ้าไฟล์หาย ไม่ error)
+        }
+      }
+
+      return res.json({
+        message: 'อัปโหลดรูปโปรไฟล์สำเร็จ',
+        user_id: userId,
+        user_image: publicUrl,
+        size_bytes: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+    } catch (err) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      console.error('[users][POST image] error:', err);
+      return res.status(500).json({
+        error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+        detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+      });
+    }
+  }
+);
 
 module.exports = router;

@@ -9,6 +9,7 @@ require('dotenv').config();
 // import express framework
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 
 // โหลด DB pool (จะลอง connect ตอน start - เห็นผลใน log)
 require('./src/db');
@@ -54,6 +55,16 @@ app.use(cors(corsOptions));
 
 // บอก express ให้ parse JSON body ของ request ได้
 app.use(express.json());
+
+// ============================================================
+//  Static: /api/uploads/  -> serve ไฟล์ที่อัปโหลด (รูปโปรไฟล์ ฯลฯ)
+// ============================================================
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
+app.use('/api/uploads', express.static(UPLOADS_DIR, {
+  maxAge: '7d',          // browser cache 7 วัน
+  fallthrough: true,
+}));
+console.log('[uploads] serving from:', UPLOADS_DIR);
 
 // ============================================================
 //  Endpoint #1: GET /api/health
