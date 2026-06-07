@@ -42,6 +42,35 @@ router.get('/workers', async (req, res) => {
         LIMIT 100`,
       [me]
     );
+
+    // เพิ่ม skill categories ของแต่ละ worker (เป็น distinct categories — ใช้แสดงในการ์ด)
+    if (rows.length > 0) {
+      const workerIds = rows.map((r) => r.worker_id);
+      const placeholders = workerIds.map(() => '?').join(',');
+      const [catRows] = await pool.query(
+        `SELECT DISTINCT
+            ws.workerskill_worker_id AS worker_id,
+            cat.skill_category_id,
+            cat.skill_category_name_th
+          FROM workerskill_chaungthai ws
+          JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
+          JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+          JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
+          WHERE ws.workerskill_worker_id IN (${placeholders})
+            AND sk.skill_is_active = 1
+          ORDER BY ws.workerskill_worker_id, cat.skill_category_id`,
+        workerIds
+      );
+      const catsByWorker = {};
+      for (const cr of catRows) {
+        if (!catsByWorker[cr.worker_id]) catsByWorker[cr.worker_id] = [];
+        catsByWorker[cr.worker_id].push(cr.skill_category_name_th);
+      }
+      for (const r of rows) {
+        r.skill_categories = catsByWorker[r.worker_id] || [];
+      }
+    }
+
     return res.json({ favorites: rows });
   } catch (err) {
     console.error('[favorites][GET] error:', err);
