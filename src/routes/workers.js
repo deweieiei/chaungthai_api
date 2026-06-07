@@ -499,6 +499,43 @@ router.get('/search', async (req, res) => {
 });
 
 // ============================================================
+//  GET /api/workers/by-user/:user_id
+//  หา worker_id ของ user คนนั้น (ใช้ใน frontend หลัง login)
+//  - ถ้า user ไม่ใช่ worker → 404
+//  - ตอบเฉพาะ worker_id + worker_user_id + status
+// ============================================================
+router.get('/by-user/:user_id', async (req, res) => {
+  try {
+    const userId = Number(req.params.user_id);
+    if (!Number.isInteger(userId) || userId < 1) {
+      return res.status(400).json({ error: 'user_id ไม่ถูกต้อง' });
+    }
+    const [rows] = await pool.execute(
+      `SELECT w.worker_id, w.worker_user_id, u.user_status
+         FROM worker_chaungthai w
+         JOIN user_chaungthai u ON u.user_id = w.worker_user_id
+        WHERE w.worker_user_id = ?
+        LIMIT 1`,
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'user คนนี้ยังไม่ได้สมัครเป็นช่าง' });
+    }
+    return res.json({
+      worker_id: rows[0].worker_id,
+      worker_user_id: rows[0].worker_user_id,
+      user_status: rows[0].user_status,
+    });
+  } catch (err) {
+    console.error('[workers][by-user] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  }
+});
+
+// ============================================================
 //  GET /api/workers/:worker_id
 //  รายละเอียดช่างคนเดียว (สาธารณะ - ไม่ต้อง login)
 //    - worker + user info (ไม่รวม password/national_id)
