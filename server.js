@@ -10,9 +10,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
 
 // โหลด DB pool (จะลอง connect ตอน start - เห็นผลใน log)
 require('./src/db');
+
+// Socket.io setup (attach กับ http server ก่อน listen)
+const { initSocket } = require('./src/socket');
 
 // import routes
 const authRoutes = require('./src/routes/auth');
@@ -20,6 +24,7 @@ const userRoutes = require('./src/routes/users');
 const skillRoutes = require('./src/routes/skills');
 const locationRoutes = require('./src/routes/locations');
 const workerRoutes = require('./src/routes/workers');
+const chatRoutes = require('./src/routes/chat');
 
 // สร้าง app
 const app = express();
@@ -98,6 +103,12 @@ app.use('/api/workers', workerRoutes);
 //  → POST /api/workers              (auth required)
 //  → PUT  /api/workers/:id/skills   (auth + owner)
 //  → GET  /api/workers/search       (public)
+app.use('/api/chat', chatRoutes);
+//  → GET  /api/chat/unread-count
+//  → GET  /api/chat/conversations
+//  → GET  /api/chat/conversations/with/:user_id
+//  → GET  /api/chat/conversations/:conv_id/messages
+//  → POST /api/chat/conversations/:conv_id/messages
 
 // ============================================================
 //  404 handler (ทุก route ที่ไม่ match ข้างบน)
@@ -108,12 +119,17 @@ app.use((req, res) => {
 
 // ============================================================
 //  เริ่มรัน server
+//  ใช้ http.createServer() เพื่อให้ socket.io attach ได้ (ใช้ server เดียวกับ express)
 // ============================================================
-app.listen(PORT, () => {
+const server = http.createServer(app);
+initSocket(server, corsOptions);
+
+server.listen(PORT, () => {
   console.log('============================================');
   console.log(`  ChaungThai API`);
   console.log(`  Server running on http://localhost:${PORT}`);
   console.log(`  Test: http://localhost:${PORT}/api/health`);
+  console.log(`  Socket.io at /api/socket.io`);
   console.log(`  Env: ${process.env.NODE_ENV || 'undefined'}`);
   console.log('============================================');
 });
