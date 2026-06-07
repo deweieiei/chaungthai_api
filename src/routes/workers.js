@@ -623,7 +623,10 @@ router.get('/:worker_id', async (req, res) => {
       `SELECT
           w.worker_id, w.worker_user_id,
           w.worker_resume, w.worker_job_tickets, w.worker_total_jobs,
-          w.worker_crime_checked_at, w.worker_created_at,
+          w.worker_crime_checked_at,
+          w.worker_crime_document_url,
+          w.worker_crime_check_status,
+          w.worker_created_at,
           u.user_id, u.user_name, u.user_lastname, u.user_email,
           u.user_image, u.user_phone, u.user_bio,
           u.user_province_id, u.user_district_id, u.user_subdistrict_id,
@@ -683,6 +686,8 @@ router.get('/:worker_id', async (req, res) => {
         worker_job_tickets: w.worker_job_tickets,
         worker_total_jobs: w.worker_total_jobs,
         worker_crime_checked_at: w.worker_crime_checked_at,
+        worker_crime_document_url: w.worker_crime_document_url,
+        worker_crime_check_status: w.worker_crime_check_status,
         worker_created_at: w.worker_created_at,
       },
       user: {
@@ -761,26 +766,50 @@ router.post(
         return res.status(check.status).json({ error: check.error });
       }
 
-      // อัปเดต DB → set checked_at = NOW()
-      const [result] = await pool.execute(
-        'UPDATE worker_chaungthai SET worker_crime_checked_at = NOW() WHERE worker_id = ?',
+      // ดึง URL เก่ามาเพื่อลบไฟล์ทีหลัง (ถ้ามี)
+      const [oldRows] = await pool.execute(
+        'SELECT worker_crime_document_url FROM worker_chaungthai WHERE worker_id = ?',
         [workerId]
+      );
+      const oldUrl = oldRows[0]?.worker_crime_document_url || null;
+
+      const publicUrl = `/api/uploads/crime-docs/${req.file.filename}`;
+
+      // อัปเดต DB → set url + checked_at = NOW() + status='pending'
+      const [result] = await pool.execute(
+        `UPDATE worker_chaungthai
+            SET worker_crime_checked_at = NOW(),
+                worker_crime_document_url = ?,
+                worker_crime_check_status = 'pending'
+          WHERE worker_id = ?`,
+        [publicUrl, workerId]
       );
       if (result.affectedRows === 0) {
         fs.unlink(req.file.path, () => {});
         return res.status(404).json({ error: 'ไม่พบช่างที่ระบุ' });
       }
 
-      // ดึง timestamp ที่เพิ่ง set
+      // ลบไฟล์เก่า (ถ้าเป็น path ใน CRIME_DIR)
+      if (oldUrl && oldUrl.startsWith('/api/uploads/crime-docs/')) {
+        const oldFile = path.join(CRIME_DIR, path.basename(oldUrl));
+        if (oldFile.startsWith(CRIME_DIR + path.sep)) {
+          fs.unlink(oldFile, () => {});
+        }
+      }
+
+      // ดึง state ล่าสุด
       const [rows] = await pool.execute(
-        'SELECT worker_crime_checked_at FROM worker_chaungthai WHERE worker_id = ?',
+        `SELECT worker_crime_checked_at, worker_crime_document_url, worker_crime_check_status
+           FROM worker_chaungthai WHERE worker_id = ?`,
         [workerId]
       );
 
       return res.json({
-        message: 'อัพโหลดเอกสารประวัติอาชญากรรมสำเร็จ',
+        message: 'อัพโหลดเอกสารประวัติอาชญากรรมสำเร็จ — รอเจ้าหน้าที่ตรวจสอบ',
         worker_id: workerId,
         worker_crime_checked_at: rows[0]?.worker_crime_checked_at || null,
+        worker_crime_document_url: rows[0]?.worker_crime_document_url || null,
+        worker_crime_check_status: rows[0]?.worker_crime_check_status || null,
         file: {
           filename: req.file.filename,
           size_bytes: req.file.size,
