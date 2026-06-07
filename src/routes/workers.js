@@ -327,9 +327,15 @@ router.get('/search', async (req, res) => {
             d.district_name_th,
             s.subdistrict_name_th,
             sk.skill_id,
-            sk.skill_name_th
+            sk.skill_name_th,
+            sub.skill_subcategory_id,
+            sub.skill_subcategory_name_th,
+            cat.skill_category_id,
+            cat.skill_category_name_th
           FROM workerskill_chaungthai ws
           JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
+          LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+          LEFT JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
           JOIN worker_chaungthai w ON w.worker_id = ws.workerskill_worker_id
           JOIN user_chaungthai u ON u.user_id = w.worker_user_id
           LEFT JOIN location_province_chaungthai p ON p.province_id = u.user_province_id
@@ -347,6 +353,49 @@ router.get('/search', async (req, res) => {
         results = rows;
         matchedLevel = scope.level;
         break;
+      }
+    }
+
+    // ดึงสกิลทั้งหมดของช่างแต่ละคน (เพื่อโชว์ "ความสามารถ" ในการ์ด)
+    if (results.length > 0) {
+      const workerIds = results.map((r) => r.worker_id);
+      const placeholders = workerIds.map(() => '?').join(',');
+      const [allSkillRows] = await pool.query(
+        `SELECT
+            ws.workerskill_worker_id AS worker_id,
+            sk.skill_id,
+            sk.skill_name_th,
+            sub.skill_subcategory_id,
+            sub.skill_subcategory_name_th,
+            cat.skill_category_id,
+            cat.skill_category_name_th
+          FROM workerskill_chaungthai ws
+          JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
+          LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+          LEFT JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
+          WHERE ws.workerskill_worker_id IN (${placeholders})
+            AND sk.skill_is_active = 1
+          ORDER BY cat.skill_category_id, sub.skill_subcategory_id, sk.skill_id`,
+        workerIds
+      );
+      // จัดกลุ่ม skills เข้าตาม worker_id
+      const skillsByWorker = {};
+      for (const row of allSkillRows) {
+        const wid = row.worker_id;
+        if (!skillsByWorker[wid]) skillsByWorker[wid] = [];
+        skillsByWorker[wid].push({
+          skill_id: row.skill_id,
+          skill_name_th: row.skill_name_th,
+          skill_subcategory_id: row.skill_subcategory_id,
+          skill_subcategory_name_th: row.skill_subcategory_name_th,
+          skill_category_id: row.skill_category_id,
+          skill_category_name_th: row.skill_category_name_th,
+        });
+      }
+      // แนบ all_skills ใส่แต่ละ row
+      for (const r of results) {
+        r.all_skills = skillsByWorker[r.worker_id] || [];
+        r.skill_count = r.all_skills.length;
       }
     }
 
