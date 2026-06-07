@@ -25,6 +25,7 @@ const skillRoutes = require('./src/routes/skills');
 const locationRoutes = require('./src/routes/locations');
 const workerRoutes = require('./src/routes/workers');
 const chatRoutes = require('./src/routes/chat');
+const jobRoutes = require('./src/routes/jobs');
 
 // สร้าง app
 const app = express();
@@ -109,6 +110,12 @@ app.use('/api/chat', chatRoutes);
 //  → GET  /api/chat/conversations/with/:user_id
 //  → GET  /api/chat/conversations/:conv_id/messages
 //  → POST /api/chat/conversations/:conv_id/messages
+app.use('/api/jobs', jobRoutes);
+//  → POST  /api/jobs
+//  → GET   /api/jobs (?role=employer|worker&status=...)
+//  → GET   /api/jobs/unread-count
+//  → GET   /api/jobs/:id
+//  → PATCH /api/jobs/:id/status
 
 // ============================================================
 //  404 handler (ทุก route ที่ไม่ match ข้างบน)
