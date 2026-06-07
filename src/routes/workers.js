@@ -9,6 +9,9 @@
 // ============================================================
 
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const pool = require('../db');
 const { verifyToken } = require('../middleware/auth');
 
@@ -16,6 +19,71 @@ const router = express.Router();
 
 // ตั๋วเริ่มต้นตอนสมัครเป็นช่าง
 const DEFAULT_JOB_TICKETS = 25;
+
+// ------------------------------------------------------------
+//  Upload config: crime document + portfolio image
+// ------------------------------------------------------------
+const UPLOADS_DIR =
+  process.env.UPLOADS_DIR || path.join(__dirname, '../../uploads');
+const CRIME_DIR = path.join(UPLOADS_DIR, 'crime-docs');
+const PORTFOLIO_DIR = path.join(UPLOADS_DIR, 'portfolio');
+fs.mkdirSync(CRIME_DIR, { recursive: true });
+fs.mkdirSync(PORTFOLIO_DIR, { recursive: true });
+
+const UPLOAD_MAX = Number(process.env.UPLOAD_MAX_BYTES) || 5 * 1024 * 1024;
+
+function makeStorage(dir, prefix) {
+  return multer.diskStorage({
+    destination: (req, file, cb) => cb(null, dir),
+    filename: (req, file, cb) => {
+      let ext = path.extname(file.originalname || '').toLowerCase();
+      const allowedExt = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+      if (!allowedExt.includes(ext)) {
+        const map = {
+          'image/jpeg': '.jpg',
+          'image/png': '.png',
+          'image/webp': '.webp',
+          'application/pdf': '.pdf',
+        };
+        ext = map[file.mimetype] || '.bin';
+      }
+      const wid = (req.params && req.params.worker_id) || 'anon';
+      const ts = Date.now();
+      cb(null, `${prefix}_${wid}_${ts}${ext}`);
+    },
+  });
+}
+
+const crimeUpload = multer({
+  storage: makeStorage(CRIME_DIR, 'crime'),
+  limits: { fileSize: UPLOAD_MAX },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('รองรับเฉพาะไฟล์ jpg/png/webp/pdf'));
+  },
+});
+
+const portfolioUpload = multer({
+  storage: makeStorage(PORTFOLIO_DIR, 'portfolio'),
+  limits: { fileSize: UPLOAD_MAX },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('รองรับเฉพาะไฟล์รูป jpg/png/webp'));
+  },
+});
+
+// helper: ตรวจว่า user_id ที่ login เป็นเจ้าของ worker_id หรือไม่
+async function assertWorkerOwner(workerId, userId, conn = pool) {
+  const [rows] = await conn.execute(
+    'SELECT worker_user_id FROM worker_chaungthai WHERE worker_id = ? LIMIT 1',
+    [workerId]
+  );
+  if (rows.length === 0) return { error: 'ไม่พบช่างที่ระบุ', status: 404 };
+  if (rows[0].worker_user_id !== userId) return { error: 'ไม่อนุญาตให้แก้ไขข้อมูลของผู้อื่น', status: 403 };
+  return { ok: true };
+}
 
 // ============================================================
 //  POST /api/workers
@@ -649,6 +717,230 @@ router.get('/:worker_id', async (req, res) => {
     });
   } catch (err) {
     console.error('[workers][GET :id] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  }
+});
+
+// ============================================================
+//  POST /api/workers/:worker_id/crime-document
+//  อัพโหลดเอกสารประวัติอาชญากรรม (login + เจ้าของ)
+//  - multipart field name = "document"
+//  - jpg/png/webp/pdf, max 5MB
+//  - บันทึกไฟล์ใน uploads/crime-docs/crime_<worker_id>_<ts>.<ext>
+//  - SET worker_crime_checked_at = NOW() (ถือว่ายื่นแล้ว/รอตรวจ)
+// ============================================================
+router.post(
+  '/:worker_id/crime-document',
+  verifyToken,
+  (req, res, next) => {
+    crimeUpload.single('document')(req, res, (err) => {
+      if (err) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const workerId = Number(req.params.worker_id);
+      if (!Number.isInteger(workerId) || workerId < 1) {
+        if (req.file) fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ error: 'worker_id ไม่ถูกต้อง' });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: 'กรุณาแนบไฟล์ที่ field "document"' });
+      }
+
+      const check = await assertWorkerOwner(workerId, req.user.user_id);
+      if (check.error) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(check.status).json({ error: check.error });
+      }
+
+      // อัปเดต DB → set checked_at = NOW()
+      const [result] = await pool.execute(
+        'UPDATE worker_chaungthai SET worker_crime_checked_at = NOW() WHERE worker_id = ?',
+        [workerId]
+      );
+      if (result.affectedRows === 0) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(404).json({ error: 'ไม่พบช่างที่ระบุ' });
+      }
+
+      // ดึง timestamp ที่เพิ่ง set
+      const [rows] = await pool.execute(
+        'SELECT worker_crime_checked_at FROM worker_chaungthai WHERE worker_id = ?',
+        [workerId]
+      );
+
+      return res.json({
+        message: 'อัพโหลดเอกสารประวัติอาชญากรรมสำเร็จ',
+        worker_id: workerId,
+        worker_crime_checked_at: rows[0]?.worker_crime_checked_at || null,
+        file: {
+          filename: req.file.filename,
+          size_bytes: req.file.size,
+          mimetype: req.file.mimetype,
+        },
+      });
+    } catch (err) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      console.error('[workers][crime-document] error:', err);
+      return res.status(500).json({
+        error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+        detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+      });
+    }
+  }
+);
+
+// ============================================================
+//  POST /api/workers/:worker_id/resume-images
+//  อัพโหลดภาพ portfolio (login + เจ้าของ)
+//  - multipart: image + caption (optional)
+//  - jpg/png/webp, max 5MB
+//  - max 20 รูป/ช่าง (DB trigger บังคับ)
+//  - order = max(order)+1
+// ============================================================
+router.post(
+  '/:worker_id/resume-images',
+  verifyToken,
+  (req, res, next) => {
+    portfolioUpload.single('image')(req, res, (err) => {
+      if (err) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const workerId = Number(req.params.worker_id);
+      if (!Number.isInteger(workerId) || workerId < 1) {
+        if (req.file) fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ error: 'worker_id ไม่ถูกต้อง' });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: 'กรุณาแนบไฟล์รูปที่ field "image"' });
+      }
+
+      const check = await assertWorkerOwner(workerId, req.user.user_id);
+      if (check.error) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(check.status).json({ error: check.error });
+      }
+
+      const caption =
+        typeof req.body.caption === 'string' && req.body.caption.trim() !== ''
+          ? req.body.caption.trim().slice(0, 255)
+          : null;
+
+      const publicUrl = `/api/uploads/portfolio/${req.file.filename}`;
+
+      // หา next order
+      const [maxRows] = await pool.execute(
+        `SELECT COALESCE(MAX(worker_resume_image_order), 0) AS max_order
+           FROM worker_resume_image_chaungthai
+          WHERE worker_resume_image_worker_id = ?`,
+        [workerId]
+      );
+      const nextOrder = Number(maxRows[0].max_order) + 1;
+
+      try {
+        const [result] = await pool.execute(
+          `INSERT INTO worker_resume_image_chaungthai
+             (worker_resume_image_worker_id, worker_resume_image_url,
+              worker_resume_image_order, worker_resume_image_caption)
+           VALUES (?, ?, ?, ?)`,
+          [workerId, publicUrl, nextOrder, caption]
+        );
+        return res.status(201).json({
+          message: 'อัพโหลดภาพ portfolio สำเร็จ',
+          image: {
+            worker_resume_image_id: result.insertId,
+            worker_resume_image_worker_id: workerId,
+            worker_resume_image_url: publicUrl,
+            worker_resume_image_order: nextOrder,
+            worker_resume_image_caption: caption,
+          },
+        });
+      } catch (dbErr) {
+        // DB trigger throw error เมื่อเกิน 20 รูป
+        fs.unlink(req.file.path, () => {});
+        const msg = (dbErr && dbErr.sqlMessage) || dbErr.message || '';
+        if (msg.includes('20')) {
+          return res.status(409).json({ error: 'ช่างคนนี้มีรูป portfolio ครบ 20 ภาพแล้ว' });
+        }
+        throw dbErr;
+      }
+    } catch (err) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      console.error('[workers][resume-images][POST] error:', err);
+      return res.status(500).json({
+        error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+        detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+      });
+    }
+  }
+);
+
+// ============================================================
+//  DELETE /api/workers/:worker_id/resume-images/:image_id
+//  ลบภาพ portfolio (login + เจ้าของ)
+// ============================================================
+router.delete('/:worker_id/resume-images/:image_id', verifyToken, async (req, res) => {
+  try {
+    const workerId = Number(req.params.worker_id);
+    const imageId = Number(req.params.image_id);
+    if (!Number.isInteger(workerId) || workerId < 1 ||
+        !Number.isInteger(imageId) || imageId < 1) {
+      return res.status(400).json({ error: 'id ไม่ถูกต้อง' });
+    }
+
+    const check = await assertWorkerOwner(workerId, req.user.user_id);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    // หา URL ของรูปก่อนเพื่อลบไฟล์
+    const [imgRows] = await pool.execute(
+      `SELECT worker_resume_image_url
+         FROM worker_resume_image_chaungthai
+        WHERE worker_resume_image_id = ?
+          AND worker_resume_image_worker_id = ?
+        LIMIT 1`,
+      [imageId, workerId]
+    );
+    if (imgRows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบรูปที่ระบุ' });
+    }
+    const imageUrl = imgRows[0].worker_resume_image_url;
+
+    // ลบ row
+    await pool.execute(
+      `DELETE FROM worker_resume_image_chaungthai
+        WHERE worker_resume_image_id = ?`,
+      [imageId]
+    );
+
+    // ลบไฟล์จริง (silent — ไม่ throw)
+    if (imageUrl && imageUrl.startsWith('/api/uploads/portfolio/')) {
+      const filename = path.basename(imageUrl);
+      const filePath = path.join(PORTFOLIO_DIR, filename);
+      if (filePath.startsWith(PORTFOLIO_DIR + path.sep)) {
+        fs.unlink(filePath, () => {});
+      }
+    }
+
+    return res.json({
+      message: 'ลบรูปสำเร็จ',
+      worker_resume_image_id: imageId,
+    });
+  } catch (err) {
+    console.error('[workers][resume-images][DELETE] error:', err);
     return res.status(500).json({
       error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
       detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
