@@ -250,33 +250,39 @@ router.put('/:worker_id/skills', verifyToken, async (req, res) => {
 // ============================================================
 //  GET /api/workers/search
 //  ค้นหาช่างตามสกิล + พื้นที่
-//  Query params:
-//    skill_id        (required) - id ของสกิลที่ต้องการ
-//    subdistrict_id  (optional) - หาในตำบลนั้น
-//    district_id     (optional) - หาในอำเภอนั้น
-//    province_id     (optional) - หาในจังหวัดนั้น
-//    auto_expand     (optional) - 'true' = ถ้าไม่เจอในตำบล/อำเภอที่ส่ง
-//                                  จะขยายไปขั้นถัดไปอัตโนมัติ
-//    limit           (optional) - default 20, max 100
 //
-//  ลำดับความสำคัญ: subdistrict > district > province
+//  Skill filter (optional - ระดับใดระดับหนึ่ง; ไม่ระบุ = ทุกสกิล):
+//    skill_id              - กรองด้วยสกิลเดียว (เฉพาะที่สุด)
+//    skill_subcategory_id  - กรองทุกสกิลใน subcategory นี้
+//    skill_category_id     - กรองทุกสกิลใน category นี้ (สาขา)
+//    ถ้าระบุหลายตัว ใช้อันที่เฉพาะที่สุด: skill > subcategory > category
+//
+//  Location (required - อย่างน้อย 1):
+//    subdistrict_id / district_id / province_id
+//
+//  อื่นๆ:
+//    auto_expand  - 'true' = ขยาย scope ถ้าไม่เจอในระดับเล็ก
+//    limit        - default 20, max 100
 // ============================================================
 router.get('/search', async (req, res) => {
   try {
     const q = req.query;
 
-    // ----- required: skill_id -----
-    const skillId = Number(q.skill_id);
-    if (!Number.isInteger(skillId) || skillId < 1) {
-      return res.status(400).json({ error: 'skill_id (required) ต้องเป็นจำนวนเต็มบวก' });
-    }
-
-    // ----- optional location ids -----
     const parsePosInt = (v) => {
-      if (v === undefined || v === '') return null;
+      if (v === undefined || v === '' || v === null) return null;
       const n = Number(v);
       return Number.isInteger(n) && n > 0 ? n : 'INVALID';
     };
+
+    // ----- skill filter (all optional) -----
+    const skillId = parsePosInt(q.skill_id);
+    const subcatId = parsePosInt(q.skill_subcategory_id);
+    const catId = parsePosInt(q.skill_category_id);
+    if (skillId === 'INVALID' || subcatId === 'INVALID' || catId === 'INVALID') {
+      return res.status(400).json({ error: 'skill_id / skill_subcategory_id / skill_category_id ต้องเป็นจำนวนเต็มบวก' });
+    }
+
+    // ----- location ids -----
     const subId = parsePosInt(q.subdistrict_id);
     const disId = parsePosInt(q.district_id);
     const provId = parsePosInt(q.province_id);
@@ -294,19 +300,95 @@ router.get('/search', async (req, res) => {
     if (!Number.isInteger(limit) || limit < 1) limit = 20;
     if (limit > 100) limit = 100;
 
-    // ลำดับ scope ที่จะลอง (เล็ก -> ใหญ่)
+    // ----- เลือก skill filter ที่เฉพาะที่สุด -----
+    //   skill > subcategory > category
+    let skillCond = '';
+    let skillParam = null;
+    let appliedFilter = null;  // 'skill' | 'subcategory' | 'category' | null
+    if (skillId) {
+      skillCond = 'AND sk.skill_id = ?';
+      skillParam = skillId;
+      appliedFilter = 'skill';
+    } else if (subcatId) {
+      skillCond = 'AND sk.skill_subcategory_id = ?';
+      skillParam = subcatId;
+      appliedFilter = 'subcategory';
+    } else if (catId) {
+      // category → ผ่าน sub join
+      skillCond = 'AND sub.skill_subcategory_category_id = ?';
+      skillParam = catId;
+      appliedFilter = 'category';
+    }
+    // ไม่ระบุอะไรเลย → skillCond = '' = ทุกสกิล
+
+    // ----- ดึง label ของ filter (สำหรับ frontend แสดงผล) -----
+    let filterInfo = {
+      skill_id: skillId || null,
+      skill_subcategory_id: subcatId || null,
+      skill_category_id: catId || null,
+      skill_name_th: null,
+      skill_subcategory_name_th: null,
+      skill_category_name_th: null,
+    };
+    if (appliedFilter === 'skill') {
+      const [rows] = await pool.execute(
+        `SELECT sk.skill_id, sk.skill_name_th,
+                sub.skill_subcategory_id, sub.skill_subcategory_name_th,
+                cat.skill_category_id, cat.skill_category_name_th
+           FROM skill_chaungthai sk
+           LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+           LEFT JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
+          WHERE sk.skill_id = ? LIMIT 1`,
+        [skillId]
+      );
+      if (rows[0]) {
+        filterInfo.skill_name_th = rows[0].skill_name_th;
+        filterInfo.skill_subcategory_id = rows[0].skill_subcategory_id;
+        filterInfo.skill_subcategory_name_th = rows[0].skill_subcategory_name_th;
+        filterInfo.skill_category_id = rows[0].skill_category_id;
+        filterInfo.skill_category_name_th = rows[0].skill_category_name_th;
+      }
+    } else if (appliedFilter === 'subcategory') {
+      const [rows] = await pool.execute(
+        `SELECT sub.skill_subcategory_id, sub.skill_subcategory_name_th,
+                cat.skill_category_id, cat.skill_category_name_th
+           FROM skill_subcategory_chaungthai sub
+           LEFT JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
+          WHERE sub.skill_subcategory_id = ? LIMIT 1`,
+        [subcatId]
+      );
+      if (rows[0]) {
+        filterInfo.skill_subcategory_name_th = rows[0].skill_subcategory_name_th;
+        filterInfo.skill_category_id = rows[0].skill_category_id;
+        filterInfo.skill_category_name_th = rows[0].skill_category_name_th;
+      }
+    } else if (appliedFilter === 'category') {
+      const [rows] = await pool.execute(
+        `SELECT skill_category_id, skill_category_name_th
+           FROM skill_category_chaungthai WHERE skill_category_id = ? LIMIT 1`,
+        [catId]
+      );
+      if (rows[0]) {
+        filterInfo.skill_category_name_th = rows[0].skill_category_name_th;
+      }
+    }
+
+    // ----- scope filter (พื้นที่) -----
     const scopes = [];
     if (subId) scopes.push({ level: 'subdistrict', field: 'u.user_subdistrict_id', val: subId });
     if (disId) scopes.push({ level: 'district', field: 'u.user_district_id', val: disId });
     if (provId) scopes.push({ level: 'province', field: 'u.user_province_id', val: provId });
-
-    // หา scope ที่เล็กสุด ลอง search ก่อน
-    // ถ้า auto_expand=true และไม่เจอใน scope เล็ก -> ขยาย
     const scopesToTry = autoExpand ? scopes : [scopes[0]];
 
+    // ----- main query -----
     let results = [];
     let matchedLevel = null;
     for (const scope of scopesToTry) {
+      // ใช้ EXISTS เพื่อ filter ช่างที่มีสกิลตรงเงื่อนไข - ป้องกัน row ซ้ำ
+      const params = [];
+      if (skillParam !== null) params.push(skillParam);
+      params.push(scope.val);
+
       const [rows] = await pool.execute(
         `SELECT
             w.worker_id,
@@ -325,28 +407,27 @@ router.get('/search', async (req, res) => {
             u.user_subdistrict_id,
             p.province_name_th,
             d.district_name_th,
-            s.subdistrict_name_th,
-            sk.skill_id,
-            sk.skill_name_th,
-            sub.skill_subcategory_id,
-            sub.skill_subcategory_name_th,
-            cat.skill_category_id,
-            cat.skill_category_name_th
-          FROM workerskill_chaungthai ws
-          JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
-          LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
-          LEFT JOIN skill_category_chaungthai cat ON cat.skill_category_id = sub.skill_subcategory_category_id
-          JOIN worker_chaungthai w ON w.worker_id = ws.workerskill_worker_id
+            s.subdistrict_name_th
+          FROM worker_chaungthai w
           JOIN user_chaungthai u ON u.user_id = w.worker_user_id
           LEFT JOIN location_province_chaungthai p ON p.province_id = u.user_province_id
           LEFT JOIN location_district_chaungthai d ON d.district_id = u.user_district_id
           LEFT JOIN location_subdistrict_chaungthai s ON s.subdistrict_id = u.user_subdistrict_id
-          WHERE ws.workerskill_skill_id = ?
-            AND u.user_status = 'Active'
+          WHERE u.user_status = 'Active'
             AND ${scope.field} = ?
+            AND EXISTS (
+              SELECT 1 FROM workerskill_chaungthai ws
+              JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
+              LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+              WHERE ws.workerskill_worker_id = w.worker_id
+                AND sk.skill_is_active = 1
+                ${skillCond}
+            )
           ORDER BY w.worker_total_jobs DESC, w.worker_id ASC
           LIMIT ${limit}`,
-        [skillId, scope.val]
+        // params order: [skillParam?, scope.val] — แต่เราเอา scope.val ก่อนใน WHERE หลัก แล้ว skillParam ใน EXISTS
+        // ปรับใหม่: scope.val ก่อน, skillParam หลัง
+        skillParam !== null ? [scope.val, skillParam] : [scope.val]
       );
 
       if (rows.length > 0) {
@@ -400,10 +481,11 @@ router.get('/search', async (req, res) => {
     }
 
     return res.json({
-      skill_id: skillId,
+      filter: filterInfo,
+      applied_filter: appliedFilter,  // 'skill' | 'subcategory' | 'category' | null
       query: { subdistrict_id: subId, district_id: disId, province_id: provId },
       auto_expand: autoExpand,
-      matched_level: matchedLevel,  // null = ไม่เจอเลย
+      matched_level: matchedLevel,
       total: results.length,
       workers: results,
     });
