@@ -26,6 +26,7 @@ const locationRoutes = require('./src/routes/locations');
 const workerRoutes = require('./src/routes/workers');
 const chatRoutes = require('./src/routes/chat');
 const jobRoutes = require('./src/routes/jobs');
+const favoriteRoutes = require('./src/routes/favorites');
 
 // สร้าง app
 const app = express();
@@ -116,6 +117,10 @@ app.use('/api/jobs', jobRoutes);
 //  → GET   /api/jobs/unread-count
 //  → GET   /api/jobs/:id
 //  → PATCH /api/jobs/:id/status
+app.use('/api/favorites', favoriteRoutes);
+//  → GET    /api/favorites/workers
+//  → POST   /api/favorites/workers/:worker_id
+//  → DELETE /api/favorites/workers/:worker_id
 
 // ============================================================
 //  404 handler (ทุก route ที่ไม่ match ข้างบน)

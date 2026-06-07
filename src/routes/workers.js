@@ -611,7 +611,21 @@ router.get('/by-user/:user_id', async (req, res) => {
 //    - portfolio images (max 20)
 //  *** Hide ถ้า user_status != 'Active' ***
 // ============================================================
-router.get('/:worker_id', async (req, res) => {
+// optional auth — ถ้ามี token ถูกต้อง จะใส่ req.user ให้ (ไม่ block ถ้าไม่มี/ผิด)
+function optionalAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match || !process.env.JWT_SECRET) return next();
+  try {
+    const jwt = require('jsonwebtoken');
+    req.user = jwt.verify(match[1], process.env.JWT_SECRET);
+  } catch {
+    /* ignore — ถือว่าไม่ login */
+  }
+  next();
+}
+
+router.get('/:worker_id', optionalAuth, async (req, res) => {
   try {
     const workerId = Number(req.params.worker_id);
     if (!Number.isInteger(workerId) || workerId < 1) {
@@ -677,8 +691,20 @@ router.get('/:worker_id', async (req, res) => {
       [workerId]
     );
 
-    // ----- 4. response -----
+    // ----- 4. is_favorited (ถ้า login) -----
+    let isFavorited = false;
+    if (req.user && req.user.user_id) {
+      const [fav] = await pool.execute(
+        `SELECT 1 FROM favorite_worker_chaungthai
+          WHERE fav_user_id = ? AND fav_worker_id = ? LIMIT 1`,
+        [req.user.user_id, workerId]
+      );
+      isFavorited = fav.length > 0;
+    }
+
+    // ----- 5. response -----
     return res.json({
+      is_favorited: isFavorited,
       worker: {
         worker_id: w.worker_id,
         worker_user_id: w.worker_user_id,
