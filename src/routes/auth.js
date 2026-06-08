@@ -235,11 +235,16 @@ router.post('/login', async (req, res) => {
 //    -> รับ token -> verify -> update user_email_verified_at = NOW()
 // ------------------------------------------------------------
 
+// ============================================================
+//  POST /api/auth/verify-email/request
+//  - gen OTP 6 หลัก เก็บใน email_otp_chaungthai (exp 5 นาที)
+//  - rate-limit: ขอใหม่ได้ทุก 60 วินาที
+//  - mock (dev): return otp_code ใน response
+//  - production: ส่งทาง SMTP (TODO เมื่อสมัคร SMTP provider)
+// ============================================================
 router.post('/verify-email/request', verifyToken, async (req, res) => {
   try {
     const userId = req.user.user_id;
-
-    // ดึงอีเมลปัจจุบัน + เช็คว่ายืนยันแล้วยัง
     const [rows] = await pool.execute(
       'SELECT user_email, user_email_verified_at FROM user_chaungthai WHERE user_id = ?',
       [userId]
@@ -248,23 +253,41 @@ router.post('/verify-email/request', verifyToken, async (req, res) => {
     if (rows[0].user_email_verified_at) {
       return res.status(409).json({ error: 'ยืนยันอีเมลแล้ว' });
     }
+    if (!rows[0].user_email) {
+      return res.status(400).json({ error: 'ไม่มีอีเมลในระบบ' });
+    }
 
-    const token = jwt.sign(
-      { type: 'email_verify', user_id: userId, email: rows[0].user_email },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+    // rate-limit: ห้ามขอใหม่เกิน 1 ครั้งใน 60 วินาที
+    const [recent] = await pool.execute(
+      `SELECT otp_id FROM email_otp_chaungthai
+        WHERE otp_user_id = ?
+          AND otp_created_at > NOW() - INTERVAL 60 SECOND
+        ORDER BY otp_id DESC LIMIT 1`,
+      [userId]
+    );
+    if (recent.length > 0) {
+      return res.status(429).json({ error: 'ขอ OTP ได้อีกครั้งใน 60 วินาที' });
+    }
+
+    const otp = generate6DigitOtp();
+    await pool.execute(
+      `INSERT INTO email_otp_chaungthai
+         (otp_user_id, otp_email, otp_code, otp_expires_at)
+       VALUES (?, ?, ?, NOW() + INTERVAL 5 MINUTE)`,
+      [userId, rows[0].user_email, otp]
     );
 
-    // Mock: ส่ง URL กลับใน response (dev)
-    // ใน production: ส่ง email + ตอบ message อย่างเดียว
-    const verifyUrl = `/verify-email?token=${token}`;
+    // TODO: ส่ง email จริง — เมื่อสมัคร SMTP provider แล้ว
+    // const emailService = require('../services/email');
+    // await emailService.sendOtp(rows[0].user_email, otp);
+
     const response = {
-      message: 'ส่งลิงก์ยืนยันอีเมลแล้ว (mock - dev)',
+      message: 'ส่งรหัส OTP ไปยังอีเมลแล้ว (mock - dev)',
+      expires_in_seconds: 300,
     };
     if (isDev()) {
-      response.verify_url = verifyUrl;
-      response.verify_token = token;
-      response.note = 'mock: ใน production จะส่งอีเมลแทน';
+      response.otp_code = otp;
+      response.note = 'mock: ใน production จะส่งทางอีเมลแทน (ยังไม่ตั้ง SMTP)';
     }
     return res.json(response);
   } catch (err) {
@@ -273,35 +296,66 @@ router.post('/verify-email/request', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/verify-email/confirm', async (req, res) => {
+// ============================================================
+//  POST /api/auth/verify-email/confirm
+//  Body: { otp_code }
+//  - match OTP ของ user + ยังไม่ใช้ + ยังไม่หมดอายุ
+//  - lock for update + mark used + set user_email_verified_at
+// ============================================================
+router.post('/verify-email/confirm', verifyToken, async (req, res) => {
   try {
-    const { token } = req.body || {};
-    if (!token) return res.status(400).json({ error: 'กรุณาส่ง token' });
+    const userId = req.user.user_id;
+    const { otp_code } = req.body || {};
+    if (!otp_code || !/^\d{6}$/.test(String(otp_code))) {
+      return res.status(400).json({ error: 'otp_code ต้องเป็นตัวเลข 6 หลัก' });
+    }
 
-    let decoded;
+    const conn = await pool.getConnection();
     try {
-      decoded = jwt.verify(String(token), process.env.JWT_SECRET);
-    } catch (e) {
-      if (e.name === 'TokenExpiredError') {
-        return res.status(400).json({ error: 'token หมดอายุ กรุณาขอใหม่' });
-      }
-      return res.status(400).json({ error: 'token ไม่ถูกต้อง' });
-    }
-    if (decoded.type !== 'email_verify') {
-      return res.status(400).json({ error: 'token ไม่ใช่ประเภทยืนยันอีเมล' });
-    }
+      await conn.beginTransaction();
 
-    const [result] = await pool.execute(
-      `UPDATE user_chaungthai
-          SET user_email_verified_at = CURRENT_TIMESTAMP
-        WHERE user_id = ?
-          AND user_email = ?`,
-      [decoded.user_id, decoded.email]
-    );
-    if (result.affectedRows === 0) {
-      return res.status(400).json({ error: 'ไม่พบผู้ใช้หรืออีเมลเปลี่ยนไปแล้ว' });
+      const [rows] = await conn.execute(
+        `SELECT otp_id, otp_email FROM email_otp_chaungthai
+           WHERE otp_user_id = ?
+             AND otp_code = ?
+             AND otp_used_at IS NULL
+             AND otp_expires_at > NOW()
+           ORDER BY otp_id DESC LIMIT 1
+           FOR UPDATE`,
+        [userId, String(otp_code)]
+      );
+      if (rows.length === 0) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'OTP ไม่ถูกต้องหรือหมดอายุ' });
+      }
+
+      // ตรวจว่า email ยังตรงกับตอนขอ OTP
+      const [user] = await conn.execute(
+        'SELECT user_email FROM user_chaungthai WHERE user_id = ?',
+        [userId]
+      );
+      if (user.length === 0 || user[0].user_email !== rows[0].otp_email) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'อีเมลเปลี่ยนไปแล้ว กรุณาขอ OTP ใหม่' });
+      }
+
+      await conn.execute(
+        'UPDATE email_otp_chaungthai SET otp_used_at = CURRENT_TIMESTAMP WHERE otp_id = ?',
+        [rows[0].otp_id]
+      );
+      await conn.execute(
+        'UPDATE user_chaungthai SET user_email_verified_at = CURRENT_TIMESTAMP WHERE user_id = ?',
+        [userId]
+      );
+
+      await conn.commit();
+      return res.json({ message: 'ยืนยันอีเมลสำเร็จ', user_id: userId });
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
     }
-    return res.json({ message: 'ยืนยันอีเมลสำเร็จ', user_id: decoded.user_id });
   } catch (err) {
     console.error('[verify-email/confirm] error:', err);
     return res.status(500).json({ error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์' });
