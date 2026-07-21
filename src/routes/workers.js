@@ -435,6 +435,103 @@ router.put('/:worker_id/location', verifyToken, async (req, res) => {
 });
 
 // ============================================================
+//  PUT /api/workers/:worker_id/schedule
+//  ตั้งเวลาทำงานประจำสัปดาห์ (login + เจ้าของ) — replace mode ส่งมาทั้งชุด
+//
+//  Body: { "schedule": [
+//            { "day": 1, "start": "08:00", "end": "17:00" },
+//            { "day": 2, "start": "08:00", "end": "17:00" }
+//         ]}
+//  day: 0=อาทิตย์ ... 6=เสาร์ · วันที่ไม่ส่งมา = วันนั้นไม่รับงาน
+//  ส่ง [] = ไม่ระบุเวลา (ถือว่าติดต่อได้ตลอด)
+// ============================================================
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+router.put('/:worker_id/schedule', verifyToken, requireAccountType('worker'), async (req, res) => {
+  const workerId = Number(req.params.worker_id);
+  if (!Number.isInteger(workerId) || workerId < 1) {
+    return res.status(400).json({ error: 'worker_id ไม่ถูกต้อง' });
+  }
+
+  const raw = (req.body || {}).schedule;
+  if (!Array.isArray(raw)) {
+    return res.status(400).json({ error: 'schedule ต้องเป็น array' });
+  }
+  if (raw.length > 7) {
+    return res.status(400).json({ error: 'มีได้ไม่เกิน 7 วัน' });
+  }
+
+  // ----- ตรวจแต่ละวัน -----
+  const rows = [];
+  const seenDays = new Set();
+  for (const item of raw) {
+    const day = Number(item && item.day);
+    if (!Number.isInteger(day) || day < 0 || day > 6) {
+      return res.status(400).json({ error: 'day ต้องเป็น 0-6 (0=อาทิตย์)' });
+    }
+    if (seenDays.has(day)) {
+      return res.status(400).json({ error: 'ส่งวันซ้ำกันมา — วันละ 1 ช่วงเวลาเท่านั้น' });
+    }
+    seenDays.add(day);
+
+    const start = String((item && item.start) || '');
+    const end = String((item && item.end) || '');
+    if (!TIME_RE.test(start) || !TIME_RE.test(end)) {
+      return res.status(400).json({ error: 'เวลาต้องอยู่ในรูปแบบ HH:MM (00:00-23:59)' });
+    }
+    if (end <= start) {
+      // เทียบ string ได้เลยเพราะ HH:MM แบบเติมศูนย์หน้าเรียงตามเวลาจริง
+      return res.status(400).json({ error: 'เวลาเลิกงานต้องอยู่หลังเวลาเริ่มงาน' });
+    }
+    rows.push([workerId, day, start + ':00', end + ':00']);
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    const check = await assertWorkerOwner(workerId, req.user.user_id, conn);
+    if (check.error) {
+      conn.release();
+      return res.status(check.status).json({ error: check.error });
+    }
+
+    await conn.beginTransaction();
+    await conn.execute(
+      'DELETE FROM worker_schedule_chaungthai WHERE sched_worker_id = ?',
+      [workerId]
+    );
+    if (rows.length > 0) {
+      await conn.query(
+        `INSERT INTO worker_schedule_chaungthai
+          (sched_worker_id, sched_day, sched_start, sched_end) VALUES ?`,
+        [rows]
+      );
+    }
+    await conn.commit();
+
+    return res.json({
+      message: rows.length
+        ? `บันทึกเวลาทำงาน ${rows.length} วันแล้ว`
+        : 'ล้างเวลาทำงานแล้ว — ถือว่าติดต่อได้ตลอด',
+      worker_id: workerId,
+      schedule: rows.map(([, day, s, e]) => ({
+        day,
+        start: s.slice(0, 5),
+        end: e.slice(0, 5),
+      })),
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('[workers][PUT schedule] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  } finally {
+    conn.release();
+  }
+});
+
+// ============================================================
 //  GET /api/workers/search
 //  ค้นหาช่างบนแผนที่ (แทนระบบจังหวัด/อำเภอ/ตำบลเดิม)
 //
@@ -904,6 +1001,20 @@ router.get('/:worker_id', optionalAuth, async (req, res) => {
       [workerId]
     );
 
+    // ----- 3.5 เวลาทำงานประจำสัปดาห์ -----
+    const [schedRows] = await pool.execute(
+      `SELECT sched_day, sched_start, sched_end
+         FROM worker_schedule_chaungthai
+        WHERE sched_worker_id = ?
+        ORDER BY sched_day`,
+      [workerId]
+    );
+    const schedule = schedRows.map((r) => ({
+      day: r.sched_day,
+      start: String(r.sched_start).slice(0, 5),
+      end: String(r.sched_end).slice(0, 5),
+    }));
+
     // ----- 4. is_favorited (ถ้า login) -----
     let isFavorited = false;
     if (req.user && req.user.user_id) {
@@ -955,6 +1066,7 @@ router.get('/:worker_id', optionalAuth, async (req, res) => {
         user_identity_verified_at: w.user_identity_verified_at,
       },
       skills,
+      schedule,
       portfolio_images: images,
     });
   } catch (err) {

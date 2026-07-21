@@ -100,6 +100,7 @@ app.use('/api/workers', workerRoutes);
 //  → POST /api/workers                (auth required)
 //  → PUT  /api/workers/:id/skills     (auth + owner)
 //  → PUT  /api/workers/:id/location   (auth + owner) — ปักหมุดจุดรับงาน
+//  → PUT  /api/workers/:id/schedule   (auth + owner) — เวลาทำงานรายสัปดาห์
 //  → GET  /api/workers/search         (public) — ค้นบนแผนที่: bbox หรือ lat/lng/radius_km
 app.use('/api/chat', chatRoutes);
 //  → GET  /api/chat/unread-count
