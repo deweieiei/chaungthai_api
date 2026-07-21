@@ -609,27 +609,54 @@ router.get('/search', optionalAuth, async (req, res) => {
       }
     }
 
-    // ----- main query: กรองหยาบด้วยกรอบสี่เหลี่ยมก่อน (ใช้ idx_worker_avail_geo) -----
+    // ----- main query -----
     //  กรอบสี่เหลี่ยมกว้างกว่าวงกลม 4/π ≈ 1.27 เท่า ดึงเผื่อไว้ 1.6 เท่า
     //  แล้วค่อยคัดให้อยู่ในวงกลมจริงด้วย Haversine ใน JS
     const sqlLimit = Math.min(Math.ceil(limit * 1.6), 400);
     const availCond = includeBusy ? '' : `AND w.worker_availability = 'free'`;
 
     //  เรียงตามระยะทางกำลังสองใน SQL (ถ่วงลองจิจูดด้วย cos²(lat) ให้สัดส่วนถูก)
-    //  ทำได้เพราะรัศมีถูกจำกัดไว้ที่ 50 กม. แล้ว ชุดผู้สมัครจึงมีขอบเขต
-    //  ถ้าไม่เรียงในนี้ จะได้ช่างมั่ว ๆ ในกรอบมาแทนที่จะเป็นคนที่ใกล้ที่สุดจริง
     const cosLat2 = Math.pow(Math.cos((center.lat * Math.PI) / 180), 2);
     const distExpr =
       '((w.worker_lat - ?) * (w.worker_lat - ?) + ' +
       '(w.worker_lng - ?) * (w.worker_lng - ?) * ?)';
 
-    const params = [box.minLat, box.maxLat, box.minLng, box.maxLng];
-    if (Array.isArray(skillParam)) params.push(...skillParam);
-    else if (skillParam !== null) params.push(skillParam);
-    params.push(center.lat, center.lat, center.lng, center.lng, cosLat2);
+    // ------------------------------------------------------------
+    //  ค้นจากวงเล็กก่อนแล้วค่อยขยาย
+    //
+    //  ต้นทุนจริงอยู่ที่ ORDER BY ระยะทาง — MySQL ต้องคำนวณและเรียง
+    //  "ทุกแถวในกรอบ" ก่อนตัด LIMIT · วัดแล้วที่กรุงเทพรัศมี 50 กม.
+    //  มีผู้สมัคร 56,746 คน → เรียง 1.3 วินาที (ไม่เกี่ยวกับการกรองสกิลเลย)
+    //
+    //  พื้นที่หนาแน่นมักได้ครบตั้งแต่วงเล็ก (ผู้สมัครน้อยลงตามกำลังสองของรัศมี)
+    //  ส่วนพื้นที่ห่างไกลถึงจะขยายเต็ม 50 กม. ก็มีคนไม่เยอะอยู่แล้ว
+    // ------------------------------------------------------------
+    const radiusSteps = [...new Set([
+      Math.max(1, Math.round(center.radiusKm / 8)),
+      Math.max(1, Math.round(center.radiusKm / 3)),
+      center.radiusKm,
+    ])];
 
-    let [results] = await pool.execute(
-      `SELECT
+    let results = [];
+    let usedRadiusKm = center.radiusKm;
+
+    for (const stepKm of radiusSteps) {
+      const stepBox = bboxFromRadius(center.lat, center.lng, stepKm);
+      const params = [stepBox.minLat, stepBox.maxLat, stepBox.minLng, stepBox.maxLng];
+      if (Array.isArray(skillParam)) params.push(...skillParam);
+      else if (skillParam !== null) params.push(skillParam);
+      params.push(center.lat, center.lat, center.lng, center.lng, cosLat2);
+
+      const [rows] = await pool.execute(buildSearchSql(availCond, skillCond, distExpr, sqlLimit), params);
+      usedRadiusKm = stepKm;
+      results = rows;
+
+      // ได้ครบตามที่ขอแล้ว ไม่ต้องขยายวงต่อ
+      if (rows.length >= sqlLimit) break;
+    }
+
+    function buildSearchSql(avail, skill, dist, lim) {
+      return `SELECT
           w.worker_id,
           w.worker_user_id,
           w.worker_job_tickets,
@@ -653,24 +680,18 @@ router.get('/search', optionalAuth, async (req, res) => {
           AND w.worker_lng IS NOT NULL
           AND w.worker_lat BETWEEN ? AND ?
           AND w.worker_lng BETWEEN ? AND ?
-          ${availCond}
+          ${avail}
           AND EXISTS (
             SELECT 1 FROM workerskill_chaungthai ws
             JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
             LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
             WHERE ws.workerskill_worker_id = w.worker_id
               AND sk.skill_is_active = 1
-              ${skillCond}
+              ${skill}
           )
-        ORDER BY ${distExpr}
-        LIMIT ${sqlLimit}`,
-      //  *** ห้ามเรียงด้วยอย่างอื่นนอกจากระยะทาง ***
-      //  เคยใช้ ORDER BY worker_total_jobs DESC — ทดสอบด้วยช่าง 1 ล้านคนแล้วพบว่า
-      //  ถ้าชุดผู้สมัครใหญ่ MySQL ต้องตรวจ EXISTS(สกิล) ครบทุกแถวก่อนค่อยเรียง
-      //  (ตอนนั้นเปิดให้ดูทั้งประเทศ = 850,000 แถว → 35 วินาที)
-      //  ตอนนี้จำกัดรัศมีไว้ 50 กม. ชุดผู้สมัครจึงเล็กพอจะเรียงตามระยะทางได้
-      params
-    );
+        ORDER BY ${dist}
+        LIMIT ${lim}`;
+    }
 
     // ----- คัดให้อยู่ในวงกลมจริง (SQL กรองแค่กรอบสี่เหลี่ยม มุมกรอบอยู่นอกวง) -----
     //  SQL เรียงมาให้แล้ว แต่เรียงซ้ำด้วย Haversine เพื่อความแม่นยำของตัวเลขที่ส่งออก
@@ -746,6 +767,7 @@ router.get('/search', optionalAuth, async (req, res) => {
       applied_filter: appliedFilter,  // 'skill' | 'subcategory' | 'category' | null
       query: {
         center: { lat: center.lat, lng: center.lng, radius_km: center.radiusKm },
+        searched_radius_km: usedRadiusKm,   // วงที่ใช้จริง (ขยายทีละขั้นจนได้ครบ)
         max_radius_km: MAX_SEARCH_RADIUS_KM,
         include_busy: includeBusy,
         limit,
