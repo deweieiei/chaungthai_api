@@ -43,6 +43,7 @@ const MAX_SKILLS = 5;
 const BUSY_RATIO = 0.15;        // 15% กำลังรับงานอยู่ (ไม่ขึ้นแผนที่)
 const VERIFIED_RATIO = 0.4;     // 40% ยืนยันตัวตนแล้ว
 const JITTER_DEG = 0.018;       // ±~2 กม. รอบจุดตำบล
+const BKK_JITTER_DEG = 0.035;   // ±~4 กม. รอบจุดกลางเขต กทม. (จุดหยาบกว่า เลยกระจายกว้างกว่า)
 
 // ------------------------------------------------------------
 //  คลังชื่อไทย — คูณกันได้ ~7,700 ชื่อเต็ม (ซ้ำได้ ตามความจริง)
@@ -92,22 +93,41 @@ const randInt = (min, max) => min + ((Math.random() * (max - min + 1)) | 0);
 (async () => {
   const t0 = Date.now();
 
-  // ---- โหลดพิกัดตำบลจริง ----
-  const subdistricts = require(path.join(__dirname, '../data/sub_district.json'))
-    .filter((s) => s.lat != null && s.long != null)
-    .map((s) => [Number(s.lat), Number(s.long)]);
+  // ---- โหลดจุดกระจายหมุด ----
+  //  แต่ละจุด = [lat, lng, รัศมีสุ่มรอบจุด (องศา)]
+  const subRaw = require(path.join(__dirname, '../data/sub_district.json'));
 
-  if (subdistricts.length === 0) {
-    console.error('ไม่พบพิกัดตำบลใน data/sub_district.json');
+  //  1) ตำบลที่มีพิกัดจริง
+  const points = subRaw
+    .filter((s) => s.lat != null && s.long != null)
+    .map((s) => [Number(s.lat), Number(s.long), JITTER_DEG]);
+
+  //  2) กรุงเทพฯ — ตำบลทั้ง 170 แห่งใน sub_district.json มี lat/long เป็น null หมด
+  //     ถ้าไม่เติมตรงนี้ แผนที่กลางกรุงเทพจะว่างเปล่าทั้งที่เป็นพื้นที่สำคัญที่สุด
+  //     จึงใช้พิกัดกลางเขต (50 เขต) แทน แล้วสุ่มกระจายกว้างขึ้นให้เต็มเขต
+  const bkk = require(path.join(__dirname, '../data/bangkok_district_geo.json')).districts;
+  let bkkPoints = 0;
+  for (const s of subRaw) {
+    if (s.lat != null && s.long != null) continue;
+    const d = bkk[String(s.district_id)];
+    if (!d) continue;                       // ตำบลนอก กทม. ที่ขาดพิกัด (158 แห่ง) ข้ามไป
+    points.push([d.lat, d.lng, BKK_JITTER_DEG]);
+    bkkPoints++;
+  }
+
+  if (points.length === 0) {
+    console.error('ไม่พบพิกัดสำหรับกระจายหมุดเลย');
     process.exit(1);
   }
+  const subdistricts = points;
 
   console.log('============================================');
   console.log('  Seed Bulk Workers — ช่างปลอมทั่วประเทศ');
   console.log('============================================');
   console.log(`  จำนวนที่จะสร้าง : ${COUNT.toLocaleString('th-TH')} คน`);
   console.log(`  ต่อ batch       : ${BATCH.toLocaleString('th-TH')}`);
-  console.log(`  จุดตำบลที่ใช้    : ${subdistricts.length.toLocaleString('th-TH')} แห่ง`);
+  console.log(`  จุดกระจายหมุด    : ${subdistricts.length.toLocaleString('th-TH')} จุด` +
+              ` (ตำบล ${(subdistricts.length - bkkPoints).toLocaleString('th-TH')} + กทม.รายเขต ${bkkPoints})`);
   console.log(`  อีเมล           : fake_<n>@${EMAIL_DOMAIN} (ลบทิ้งทีหลังได้)`);
   console.log(`  รหัสผ่าน        : NULL — ล็อกอินไม่ได้`);
   console.log('============================================');
@@ -181,9 +201,9 @@ const randInt = (min, max) => min + ((Math.random() * (max - min + 1)) | 0);
         const userId = startUserId + seq;
         const workerId = startWorkerId + seq;
 
-        const [baseLat, baseLng] = pick(subdistricts);
-        const lat = +(baseLat + (Math.random() - 0.5) * JITTER_DEG).toFixed(7);
-        const lng = +(baseLng + (Math.random() - 0.5) * JITTER_DEG).toFixed(7);
+        const [baseLat, baseLng, jitter] = pick(subdistricts);
+        const lat = +(baseLat + (Math.random() - 0.5) * jitter).toFixed(7);
+        const lng = +(baseLng + (Math.random() - 0.5) * jitter).toFixed(7);
 
         userRows.push([
           userId,
