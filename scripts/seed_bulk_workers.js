@@ -153,7 +153,9 @@ const randInt = (min, max) => min + ((Math.random() * (max - min + 1)) | 0);
          FROM user_chaungthai WHERE user_email LIKE ?`,
       [`fake\\_%@${EMAIL_DOMAIN}`]
     );
-    const startSeq = fakeMax.m + 1;
+    // mysql2 คืน BIGINT/DECIMAL มาเป็น string — ไม่แปลงก่อนจะกลายเป็นต่อ string
+    // ("-1" + 1 = "-11" แล้วอีเมลเพี้ยนเป็น fake_-110@)
+    const startSeq = Number(fakeMax.m) + 1;
 
     console.log(`  user_id เริ่มที่  : ${startUserId.toLocaleString('th-TH')}`);
     console.log(`  worker_id เริ่มที่: ${startWorkerId.toLocaleString('th-TH')}`);
