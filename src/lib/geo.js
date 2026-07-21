@@ -50,25 +50,6 @@ function parseLatLng(latRaw, lngRaw) {
 }
 
 /**
- * แปลงกรอบแผนที่ที่ผู้ใช้เห็น → เงื่อนไข SQL
- * รับสตริง "min_lat,min_lng,max_lat,max_lng" (เหมือน Leaflet map.getBounds().toBBoxString() สลับลำดับ)
- */
-function parseBBox(raw) {
-  if (typeof raw !== 'string' || raw.trim() === '') {
-    return { ok: false, error: 'bbox ต้องเป็นสตริง "min_lat,min_lng,max_lat,max_lng"' };
-  }
-  const parts = raw.split(',').map((s) => Number(s.trim()));
-  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
-    return { ok: false, error: 'bbox ต้องเป็นตัวเลข 4 ตัวคั่นด้วยจุลภาค' };
-  }
-  const [minLat, minLng, maxLat, maxLng] = parts;
-  if (minLat > maxLat || minLng > maxLng) {
-    return { ok: false, error: 'bbox กลับด้าน (ค่า min ต้องน้อยกว่า max)' };
-  }
-  return { ok: true, minLat, minLng, maxLat, maxLng };
-}
-
-/**
  * กรอบสี่เหลี่ยมคร่าวๆ รอบจุดหนึ่ง ตามรัศมีเป็นกิโลเมตร
  * ใช้กรองหยาบใน SQL ก่อน แล้วค่อยคำนวณระยะจริงด้วย Haversine
  */
@@ -134,7 +115,6 @@ module.exports = {
   TH_BOUNDS,
   blurCoord,
   parseLatLng,
-  parseBBox,
   bboxFromRadius,
   distanceKm,
   canSeeExactLocation,

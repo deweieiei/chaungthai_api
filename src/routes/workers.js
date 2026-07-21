@@ -16,7 +16,6 @@ const pool = require('../db');
 const { verifyToken, requireAccountType } = require('../middleware/auth');
 const {
   parseLatLng,
-  parseBBox,
   bboxFromRadius,
   distanceKm,
   publicCoords,
@@ -83,7 +82,8 @@ const portfolioUpload = multer({
 
 // helper: ตรวจรัศมีรับงาน — คืนตัวเลข, null (ไม่ส่งมา = ใช้ default), หรือ 'INVALID'
 const DEFAULT_RADIUS_KM = 10;
-const MAX_RADIUS_KM = 200;
+const MAX_RADIUS_KM = 200;          // รัศมีรับงานที่ช่างตั้งเอง
+const MAX_SEARCH_RADIUS_KM = 50;    // เพดานการมองเห็นบนแผนที่ — ดูได้แค่รอบตัว
 function parseRadiusKm(raw) {
   if (raw === undefined || raw === null || raw === '') return null;
   const n = Number(raw);
@@ -473,31 +473,29 @@ router.get('/search', optionalAuth, async (req, res) => {
       return res.status(400).json({ error: 'skill_id / skill_subcategory_id / skill_category_id ต้องเป็นจำนวนเต็มบวก' });
     }
 
-    // ----- พื้นที่: กรอบแผนที่ (bbox) หรือ ใกล้ฉัน (lat/lng/radius) -----
-    let box = null;         // { minLat, minLng, maxLat, maxLng } — ใช้กรองหยาบใน SQL
-    let center = null;      // { lat, lng, radiusKm } — ถ้าค้นแบบรัศมี ใช้คัดระยะจริงทีหลัง
-
-    if (q.bbox !== undefined && q.bbox !== '') {
-      const parsed = parseBBox(q.bbox);
-      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-      box = parsed;
-    } else if (q.lat !== undefined && q.lng !== undefined) {
-      const geo = parseLatLng(q.lat, q.lng);
-      if (!geo.ok) return res.status(400).json({ error: geo.error });
-
-      const radiusKm = parseRadiusKm(q.radius_km);
-      if (radiusKm === 'INVALID') {
-        return res.status(400).json({ error: 'radius_km ต้องเป็นจำนวนเต็ม 1-200' });
-      }
-      const r = radiusKm === null ? DEFAULT_RADIUS_KM : radiusKm;
-      center = { lat: geo.lat, lng: geo.lng, radiusKm: r };
-      box = bboxFromRadius(geo.lat, geo.lng, r);
-    } else {
+    // ----- พื้นที่: รัศมีรอบจุดที่ระบุเท่านั้น -----
+    //  ไม่รับ bbox แล้ว — เดิมเปิดให้ส่งกรอบกว้างเท่าไหร่ก็ได้ = กวาดช่างทั้งประเทศ
+    //  ตอนนี้จำกัดไว้ที่ MAX_SEARCH_RADIUS_KM เพื่อให้ดูได้แค่รอบตัวเอง
+    if (q.lat === undefined || q.lng === undefined) {
       return res.status(400).json({
-        error:
-          'กรุณาระบุพื้นที่ค้นหา: bbox=min_lat,min_lng,max_lat,max_lng (กรอบแผนที่) หรือ lat&lng&radius_km (ใกล้ฉัน)',
+        error: 'กรุณาระบุตำแหน่ง: lat, lng และ radius_km (สูงสุด ' + MAX_SEARCH_RADIUS_KM + ' กม.)',
       });
     }
+
+    const geo = parseLatLng(q.lat, q.lng);
+    if (!geo.ok) return res.status(400).json({ error: geo.error });
+
+    const radiusKm = parseRadiusKm(q.radius_km);
+    if (radiusKm === 'INVALID') {
+      return res.status(400).json({
+        error: `radius_km ต้องเป็นจำนวนเต็ม 1-${MAX_SEARCH_RADIUS_KM}`,
+      });
+    }
+    // ส่งเกินมาก็หั่นลงให้เท่าเพดาน ไม่ต้อง error
+    const r = Math.min(radiusKm === null ? DEFAULT_RADIUS_KM : radiusKm, MAX_SEARCH_RADIUS_KM);
+
+    const center = { lat: geo.lat, lng: geo.lng, radiusKm: r };
+    const box = bboxFromRadius(geo.lat, geo.lng, r);   // กรองหยาบใน SQL ก่อน
 
     // ช่างที่ติดงานอยู่จะหายจากแผนที่ (docs/04 ข้อ 4.5) เว้นแต่ขอมาชัดเจน
     const includeBusy = String(q.include_busy || '').toLowerCase() === 'true';
@@ -506,12 +504,34 @@ router.get('/search', optionalAuth, async (req, res) => {
     if (!Number.isInteger(limit) || limit < 1) limit = 50;
     if (limit > 200) limit = 200;
 
+    // ----- เลือกหลายสกิลพร้อมกัน (ตัวกรองแบบ skill tree) -----
+    //  skill_ids=1,5,7 → เจอช่างที่มีสกิล "อย่างน้อย 1 อัน" ในรายการ
+    //  มาก่อน filter ตัวเดียวแบบเดิม เพราะเฉพาะเจาะจงกว่า
+    let skillIds = [];
+    if (q.skill_ids !== undefined && String(q.skill_ids).trim() !== '') {
+      skillIds = String(q.skill_ids)
+        .split(',')
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n > 0);
+      if (skillIds.length === 0) {
+        return res.status(400).json({ error: 'skill_ids ต้องเป็นรายการจำนวนเต็มบวก คั่นด้วยจุลภาค' });
+      }
+      if (skillIds.length > 200) {
+        return res.status(400).json({ error: 'เลือกสกิลกรองได้ไม่เกิน 200 อัน' });
+      }
+      skillIds = [...new Set(skillIds)];
+    }
+
     // ----- เลือก skill filter ที่เฉพาะที่สุด -----
-    //   skill > subcategory > category
+    //   skill_ids > skill > subcategory > category
     let skillCond = '';
     let skillParam = null;
-    let appliedFilter = null;  // 'skill' | 'subcategory' | 'category' | null
-    if (skillId) {
+    let appliedFilter = null;  // 'skills' | 'skill' | 'subcategory' | 'category' | null
+    if (skillIds.length > 0) {
+      skillCond = `AND sk.skill_id IN (${skillIds.map(() => '?').join(',')})`;
+      skillParam = skillIds;      // array — จะ spread ตอนใส่ params
+      appliedFilter = 'skills';
+    } else if (skillId) {
       skillCond = 'AND sk.skill_id = ?';
       skillParam = skillId;
       appliedFilter = 'skill';
@@ -529,14 +549,22 @@ router.get('/search', optionalAuth, async (req, res) => {
 
     // ----- ดึง label ของ filter (สำหรับ frontend แสดงผล) -----
     let filterInfo = {
+      skill_ids: skillIds.length ? skillIds : null,
       skill_id: skillId || null,
       skill_subcategory_id: subcatId || null,
       skill_category_id: catId || null,
+      skill_names_th: null,
       skill_name_th: null,
       skill_subcategory_name_th: null,
       skill_category_name_th: null,
     };
-    if (appliedFilter === 'skill') {
+    if (appliedFilter === 'skills') {
+      const [rows] = await pool.query(
+        `SELECT skill_id, skill_name_th FROM skill_chaungthai WHERE skill_id IN (?)`,
+        [skillIds]
+      );
+      filterInfo.skill_names_th = rows.map((r) => r.skill_name_th);
+    } else if (appliedFilter === 'skill') {
       const [rows] = await pool.execute(
         `SELECT sk.skill_id, sk.skill_name_th,
                 sub.skill_subcategory_id, sub.skill_subcategory_name_th,
@@ -579,13 +607,24 @@ router.get('/search', optionalAuth, async (req, res) => {
       }
     }
 
-    // ----- main query: กรองหยาบด้วยกรอบสี่เหลี่ยมก่อน (ใช้ idx_worker_geo) -----
-    //  ค้นแบบรัศมี: ดึงเผื่อจาก DB แล้วค่อยคัดระยะจริงด้วย Haversine ใน JS
-    const sqlLimit = center ? Math.min(limit * 4, 800) : limit;
+    // ----- main query: กรองหยาบด้วยกรอบสี่เหลี่ยมก่อน (ใช้ idx_worker_avail_geo) -----
+    //  กรอบสี่เหลี่ยมกว้างกว่าวงกลม 4/π ≈ 1.27 เท่า ดึงเผื่อไว้ 1.6 เท่า
+    //  แล้วค่อยคัดให้อยู่ในวงกลมจริงด้วย Haversine ใน JS
+    const sqlLimit = Math.min(Math.ceil(limit * 1.6), 400);
     const availCond = includeBusy ? '' : `AND w.worker_availability = 'free'`;
 
+    //  เรียงตามระยะทางกำลังสองใน SQL (ถ่วงลองจิจูดด้วย cos²(lat) ให้สัดส่วนถูก)
+    //  ทำได้เพราะรัศมีถูกจำกัดไว้ที่ 50 กม. แล้ว ชุดผู้สมัครจึงมีขอบเขต
+    //  ถ้าไม่เรียงในนี้ จะได้ช่างมั่ว ๆ ในกรอบมาแทนที่จะเป็นคนที่ใกล้ที่สุดจริง
+    const cosLat2 = Math.pow(Math.cos((center.lat * Math.PI) / 180), 2);
+    const distExpr =
+      '((w.worker_lat - ?) * (w.worker_lat - ?) + ' +
+      '(w.worker_lng - ?) * (w.worker_lng - ?) * ?)';
+
     const params = [box.minLat, box.maxLat, box.minLng, box.maxLng];
-    if (skillParam !== null) params.push(skillParam);
+    if (Array.isArray(skillParam)) params.push(...skillParam);
+    else if (skillParam !== null) params.push(skillParam);
+    params.push(center.lat, center.lat, center.lng, center.lng, cosLat2);
 
     let [results] = await pool.execute(
       `SELECT
@@ -621,30 +660,28 @@ router.get('/search', optionalAuth, async (req, res) => {
               AND sk.skill_is_active = 1
               ${skillCond}
           )
+        ORDER BY ${distExpr}
         LIMIT ${sqlLimit}`,
-      //  *** ห้ามใส่ ORDER BY ที่นี่ ***
-      //  เคยมี ORDER BY worker_total_jobs DESC — ทดสอบด้วยช่าง 1 ล้านคนแล้วพบว่า
-      //  มันบังคับให้ MySQL ตรวจ EXISTS(สกิล) ครบทุกแถวที่อยู่ในกรอบก่อนค่อยเรียง
-      //  (ซูมสุด + กรองหมวด = 850,000 แถว → 35 วินาที)
-      //  พอไม่มี ORDER BY เครื่องจะหยุดทันทีที่เจอครบ LIMIT → 0.06 วินาที
-      //  แผนที่ต้องการแค่ "ใครอยู่ในกรอบที่เห็น" ไม่ต้องเรียงทั้งประเทศอยู่แล้ว
-      //  ส่วนโหมดรัศมี เรียงตามระยะทางใน JS ทีหลัง (ดูด้านล่าง)
+      //  *** ห้ามเรียงด้วยอย่างอื่นนอกจากระยะทาง ***
+      //  เคยใช้ ORDER BY worker_total_jobs DESC — ทดสอบด้วยช่าง 1 ล้านคนแล้วพบว่า
+      //  ถ้าชุดผู้สมัครใหญ่ MySQL ต้องตรวจ EXISTS(สกิล) ครบทุกแถวก่อนค่อยเรียง
+      //  (ตอนนั้นเปิดให้ดูทั้งประเทศ = 850,000 แถว → 35 วินาที)
+      //  ตอนนี้จำกัดรัศมีไว้ 50 กม. ชุดผู้สมัครจึงเล็กพอจะเรียงตามระยะทางได้
       params
     );
 
-    // ----- ค้นแบบรัศมี: คัดวงกลมจริง + เรียงตามใกล้สุด -----
-    if (center) {
-      results = results
-        .map((r) => ({
-          ...r,
-          distance_km: Number(
-            distanceKm(center.lat, center.lng, Number(r.worker_lat), Number(r.worker_lng)).toFixed(2)
-          ),
-        }))
-        .filter((r) => r.distance_km <= center.radiusKm)
-        .sort((a, b) => a.distance_km - b.distance_km)
-        .slice(0, limit);
-    }
+    // ----- คัดให้อยู่ในวงกลมจริง (SQL กรองแค่กรอบสี่เหลี่ยม มุมกรอบอยู่นอกวง) -----
+    //  SQL เรียงมาให้แล้ว แต่เรียงซ้ำด้วย Haversine เพื่อความแม่นยำของตัวเลขที่ส่งออก
+    results = results
+      .map((r) => ({
+        ...r,
+        distance_km: Number(
+          distanceKm(center.lat, center.lng, Number(r.worker_lat), Number(r.worker_lng)).toFixed(2)
+        ),
+      }))
+      .filter((r) => r.distance_km <= center.radiusKm)
+      .sort((a, b) => a.distance_km - b.distance_km)
+      .slice(0, limit);
 
     // ----- เปิดเผยพิกัด 2 ระดับ: ยังไม่ยืนยันตัวตน = เห็นแค่จุดเบลอ ~1 กม. -----
     const viewerVerified = await isViewerVerified(req.user);
@@ -706,12 +743,8 @@ router.get('/search', optionalAuth, async (req, res) => {
       filter: filterInfo,
       applied_filter: appliedFilter,  // 'skill' | 'subcategory' | 'category' | null
       query: {
-        mode: center ? 'radius' : 'bbox',
-        bbox: {
-          min_lat: box.minLat, min_lng: box.minLng,
-          max_lat: box.maxLat, max_lng: box.maxLng,
-        },
-        center: center ? { lat: center.lat, lng: center.lng, radius_km: center.radiusKm } : null,
+        center: { lat: center.lat, lng: center.lng, radius_km: center.radiusKm },
+        max_radius_km: MAX_SEARCH_RADIUS_KM,
         include_busy: includeBusy,
         limit,
       },
