@@ -18,7 +18,7 @@
 
 const express = require('express');
 const pool = require('../db');
-const { verifyToken } = require('../middleware/auth');
+const { verifyToken, requireAccountType } = require('../middleware/auth');
 const { getIO } = require('../socket');
 
 const router = express.Router();
@@ -102,10 +102,13 @@ async function postSystemMessage(convId, payload) {
 }
 
 // ============================================================
-//  POST /api/jobs
+//  POST /api/jobs — จ้างงาน (เฉพาะบัญชีผู้ว่าจ้าง)
 //  Body: { worker_user_id, detail, price, start_date, deadline, conv_id? }
+//
+//  ช่างจ้างคนอื่นไม่ได้จากบัญชีช่าง — ต้องใช้บัญชีผู้ว่าจ้างของตัวเอง
+//  (บัญชี 2 ฝั่งแยกกันสมบูรณ์ ตั้งแต่ migration 12)
 // ============================================================
-router.post('/', async (req, res) => {
+router.post('/', requireAccountType('employer'), async (req, res) => {
   try {
     const me = req.user.user_id;
     const {

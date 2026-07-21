@@ -44,4 +44,28 @@ function verifyToken(req, res, next) {
   }
 }
 
-module.exports = { verifyToken };
+/**
+ * Middleware factory: จำกัดว่า endpoint นี้ใช้ได้เฉพาะบัญชีฝั่งไหน
+ *
+ * ช่างกับผู้ว่าจ้างเป็นคนละบัญชีกันสมบูรณ์ (migration 12)
+ * ใช้ต่อจาก verifyToken เสมอ เช่น:
+ *   router.post('/', verifyToken, requireAccountType('worker'), handler)
+ *
+ * token เก่าที่ออกก่อน migration 12 ไม่มี user_account_type → ถือเป็น employer
+ */
+function requireAccountType(type) {
+  const LABEL = { employer: 'ผู้ว่าจ้าง', worker: 'ช่าง' };
+  return function (req, res, next) {
+    const mine = (req.user && req.user.user_account_type) || 'employer';
+    if (mine !== type) {
+      return res.status(403).json({
+        error: `ต้องใช้บัญชี${LABEL[type]}เท่านั้น — ตอนนี้คุณอยู่ในบัญชี${LABEL[mine] || mine}`,
+        required_account_type: type,
+        current_account_type: mine,
+      });
+    }
+    return next();
+  };
+}
+
+module.exports = { verifyToken, requireAccountType };

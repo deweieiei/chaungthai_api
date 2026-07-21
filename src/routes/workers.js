@@ -13,7 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const pool = require('../db');
-const { verifyToken } = require('../middleware/auth');
+const { verifyToken, requireAccountType } = require('../middleware/auth');
 const {
   parseLatLng,
   parseBBox,
@@ -130,7 +130,7 @@ async function assertWorkerOwner(workerId, userId, conn = pool) {
 //
 //  สมัครซ้ำ -> 409
 // ============================================================
-router.post('/', verifyToken, async (req, res) => {
+router.post('/', verifyToken, requireAccountType('worker'), async (req, res) => {
   const userId = req.user.user_id;
   const body = req.body || {};
 

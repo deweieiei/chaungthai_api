@@ -63,7 +63,7 @@ const PUBLIC_FIELDS = `
   user_id, user_name, user_lastname, user_email, user_image,
   user_phone, user_birthday, user_address, user_bio,
   user_lat, user_lng,
-  user_role, user_status,
+  user_role, user_account_type, user_status,
   user_email_verified_at, user_phone_verified_at, user_identity_verified_at,
   user_created_at, user_updated_at, user_last_login_at
 `;
