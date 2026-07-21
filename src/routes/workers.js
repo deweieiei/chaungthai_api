@@ -1093,7 +1093,11 @@ router.post(
     crimeUpload.single('document')(req, res, (err) => {
       if (err) {
         const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
-        return res.status(status).json({ error: err.message });
+        return res.status(status).json({
+          error: err.code === 'LIMIT_FILE_SIZE'
+            ? `ไฟล์ใหญ่เกิน ${Math.round(UPLOAD_MAX / 1024 / 1024)} MB — ลองย่อรูปหรือบันทึกเป็น JPG ก่อน`
+            : err.message,
+        });
       }
       next();
     });
@@ -1191,7 +1195,11 @@ router.post(
     portfolioUpload.single('image')(req, res, (err) => {
       if (err) {
         const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
-        return res.status(status).json({ error: err.message });
+        return res.status(status).json({
+          error: err.code === 'LIMIT_FILE_SIZE'
+            ? `ไฟล์ใหญ่เกิน ${Math.round(UPLOAD_MAX / 1024 / 1024)} MB — ลองย่อรูปหรือบันทึกเป็น JPG ก่อน`
+            : err.message,
+        });
       }
       next();
     });
