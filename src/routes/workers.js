@@ -14,6 +14,13 @@ const fs = require('fs');
 const multer = require('multer');
 const pool = require('../db');
 const { verifyToken } = require('../middleware/auth');
+const {
+  parseLatLng,
+  parseBBox,
+  bboxFromRadius,
+  distanceKm,
+  publicCoords,
+} = require('../lib/geo');
 
 const router = express.Router();
 
@@ -74,6 +81,26 @@ const portfolioUpload = multer({
   },
 });
 
+// helper: ตรวจรัศมีรับงาน — คืนตัวเลข, null (ไม่ส่งมา = ใช้ default), หรือ 'INVALID'
+const DEFAULT_RADIUS_KM = 10;
+const MAX_RADIUS_KM = 200;
+function parseRadiusKm(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_RADIUS_KM) return 'INVALID';
+  return n;
+}
+
+// helper: คนที่กำลังดูอยู่ ยืนยันตัวตนแล้วหรือยัง (ใช้ตัดสินว่าเห็นพิกัดจริงหรือพิกัดเบลอ)
+async function isViewerVerified(viewer) {
+  if (!viewer || !viewer.user_id) return false;
+  const [rows] = await pool.execute(
+    'SELECT user_identity_verified_at FROM user_chaungthai WHERE user_id = ? LIMIT 1',
+    [viewer.user_id]
+  );
+  return Boolean(rows[0] && rows[0].user_identity_verified_at);
+}
+
 // helper: ตรวจว่า user_id ที่ login เป็นเจ้าของ worker_id หรือไม่
 async function assertWorkerOwner(workerId, userId, conn = pool) {
   const [rows] = await conn.execute(
@@ -95,7 +122,10 @@ async function assertWorkerOwner(workerId, userId, conn = pool) {
 //  Body:
 //    {
 //      "worker_resume": "ประวัติ ประสบการณ์..." (optional),
-//      "skill_ids": [1, 11, 13]                (optional, max 50)
+//      "skill_ids": [1, 11, 13],               (optional, max 50)
+//      "worker_lat": 18.7883,                  (optional — หมุดจุดรับงาน)
+//      "worker_lng": 98.9853,
+//      "worker_service_radius_km": 15          (optional, default 10)
 //    }
 //
 //  สมัครซ้ำ -> 409
@@ -109,6 +139,21 @@ router.post('/', verifyToken, async (req, res) => {
     typeof body.worker_resume === 'string' && body.worker_resume.trim() !== ''
       ? body.worker_resume.trim()
       : null;
+
+  // หมุดบนแผนที่ — ไม่ส่งมาก็สมัครได้ แต่จะยังไม่ขึ้นแผนที่จนกว่าจะปักหมุด
+  let lat = null;
+  let lng = null;
+  if (body.worker_lat !== undefined && body.worker_lat !== null && body.worker_lat !== '') {
+    const geo = parseLatLng(body.worker_lat, body.worker_lng);
+    if (!geo.ok) return res.status(400).json({ error: geo.error });
+    lat = geo.lat;
+    lng = geo.lng;
+  }
+
+  const radiusKm = parseRadiusKm(body.worker_service_radius_km);
+  if (radiusKm === 'INVALID') {
+    return res.status(400).json({ error: 'รัศมีรับงานต้องเป็นจำนวนเต็ม 1-200 กม.' });
+  }
 
   let uniqueSkillIds = [];
   if (body.skill_ids !== undefined && body.skill_ids !== null) {
@@ -160,12 +205,20 @@ router.post('/', verifyToken, async (req, res) => {
       }
     }
 
-    // --- 4) INSERT worker_chaungthai (resume + tickets=25) ---
+    // --- 4) INSERT worker_chaungthai (resume + tickets=25 + หมุดแผนที่) ---
     const [result] = await conn.execute(
       `INSERT INTO worker_chaungthai
-        (worker_user_id, worker_resume, worker_job_tickets)
-       VALUES (?, ?, ?)`,
-      [userId, worker_resume, DEFAULT_JOB_TICKETS]
+        (worker_user_id, worker_resume, worker_job_tickets,
+         worker_lat, worker_lng, worker_service_radius_km)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        worker_resume,
+        DEFAULT_JOB_TICKETS,
+        lat,
+        lng,
+        radiusKm === null ? DEFAULT_RADIUS_KM : radiusKm,
+      ]
     );
     const newWorkerId = result.insertId;
 
@@ -198,6 +251,11 @@ router.post('/', verifyToken, async (req, res) => {
       worker_resume,
       worker_job_tickets: DEFAULT_JOB_TICKETS,
       worker_total_jobs: 0,
+      worker_lat: lat,
+      worker_lng: lng,
+      worker_service_radius_km: radiusKm === null ? DEFAULT_RADIUS_KM : radiusKm,
+      worker_availability: 'free',
+      has_pin: lat !== null,
       skill_count: uniqueSkillIds.length,
       skill_ids: uniqueSkillIds,
     });
@@ -316,8 +374,69 @@ router.put('/:worker_id/skills', verifyToken, async (req, res) => {
 });
 
 // ============================================================
+//  PUT /api/workers/:worker_id/location
+//  ปักหมุด / ย้ายหมุดจุดรับงาน + ตั้งรัศมี (login + เจ้าของ)
+//  Body: { "worker_lat": 18.7883, "worker_lng": 98.9853, "worker_service_radius_km": 15 }
+// ============================================================
+router.put('/:worker_id/location', verifyToken, async (req, res) => {
+  try {
+    const workerId = Number(req.params.worker_id);
+    if (!Number.isInteger(workerId) || workerId < 1) {
+      return res.status(400).json({ error: 'worker_id ไม่ถูกต้อง' });
+    }
+
+    const body = req.body || {};
+    const geo = parseLatLng(body.worker_lat, body.worker_lng);
+    if (!geo.ok) return res.status(400).json({ error: geo.error });
+
+    const radiusKm = parseRadiusKm(body.worker_service_radius_km);
+    if (radiusKm === 'INVALID') {
+      return res.status(400).json({ error: 'รัศมีรับงานต้องเป็นจำนวนเต็ม 1-200 กม.' });
+    }
+
+    const check = await assertWorkerOwner(workerId, req.user.user_id);
+    if (check.error) return res.status(check.status).json({ error: check.error });
+
+    // ไม่ส่งรัศมีมา = คงค่าเดิมไว้
+    const sets = ['worker_lat = ?', 'worker_lng = ?'];
+    const params = [geo.lat, geo.lng];
+    if (radiusKm !== null) {
+      sets.push('worker_service_radius_km = ?');
+      params.push(radiusKm);
+    }
+    params.push(workerId);
+
+    await pool.execute(
+      `UPDATE worker_chaungthai SET ${sets.join(', ')} WHERE worker_id = ?`,
+      params
+    );
+
+    const [rows] = await pool.execute(
+      `SELECT worker_lat, worker_lng, worker_service_radius_km, worker_availability
+         FROM worker_chaungthai WHERE worker_id = ? LIMIT 1`,
+      [workerId]
+    );
+
+    return res.json({
+      message: 'บันทึกตำแหน่งรับงานแล้ว',
+      worker_id: workerId,
+      worker_lat: rows[0] ? Number(rows[0].worker_lat) : geo.lat,
+      worker_lng: rows[0] ? Number(rows[0].worker_lng) : geo.lng,
+      worker_service_radius_km: rows[0]?.worker_service_radius_km ?? DEFAULT_RADIUS_KM,
+      worker_availability: rows[0]?.worker_availability ?? 'free',
+    });
+  } catch (err) {
+    console.error('[workers][PUT location] error:', err);
+    return res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในเซิร์ฟเวอร์',
+      detail: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+    });
+  }
+});
+
+// ============================================================
 //  GET /api/workers/search
-//  ค้นหาช่างตามสกิล + พื้นที่
+//  ค้นหาช่างบนแผนที่ (แทนระบบจังหวัด/อำเภอ/ตำบลเดิม)
 //
 //  Skill filter (optional - ระดับใดระดับหนึ่ง; ไม่ระบุ = ทุกสกิล):
 //    skill_id              - กรองด้วยสกิลเดียว (เฉพาะที่สุด)
@@ -325,14 +444,18 @@ router.put('/:worker_id/skills', verifyToken, async (req, res) => {
 //    skill_category_id     - กรองทุกสกิลใน category นี้ (สาขา)
 //    ถ้าระบุหลายตัว ใช้อันที่เฉพาะที่สุด: skill > subcategory > category
 //
-//  Location (required - อย่างน้อย 1):
-//    subdistrict_id / district_id / province_id
+//  พื้นที่ (required - เลือก 1 แบบ):
+//    bbox=min_lat,min_lng,max_lat,max_lng   กรอบแผนที่ที่ผู้ใช้เห็นอยู่
+//    lat=..&lng=..&radius_km=..             ปุ่ม "ใกล้ฉัน" (radius default 10, max 200)
 //
 //  อื่นๆ:
-//    auto_expand  - 'true' = ขยาย scope ถ้าไม่เจอในระดับเล็ก
-//    limit        - default 20, max 100
+//    include_busy - 'true' = เอาช่างที่ติดงานอยู่มาด้วย (default: เฉพาะช่างว่าง)
+//    limit        - default 50, max 200
+//
+//  หมายเหตุพิกัด: คนที่ยังไม่ยืนยันตัวตนจะได้พิกัด "เบลอ" ปัดกริด ~1 กม.
+//  (ดู src/lib/geo.js + docs/04_ระบบแผนที่.md)
 // ============================================================
-router.get('/search', async (req, res) => {
+router.get('/search', optionalAuth, async (req, res) => {
   try {
     const q = req.query;
 
@@ -350,23 +473,38 @@ router.get('/search', async (req, res) => {
       return res.status(400).json({ error: 'skill_id / skill_subcategory_id / skill_category_id ต้องเป็นจำนวนเต็มบวก' });
     }
 
-    // ----- location ids -----
-    const subId = parsePosInt(q.subdistrict_id);
-    const disId = parsePosInt(q.district_id);
-    const provId = parsePosInt(q.province_id);
-    if (subId === 'INVALID' || disId === 'INVALID' || provId === 'INVALID') {
-      return res.status(400).json({ error: 'location id ต้องเป็นจำนวนเต็มบวก' });
-    }
-    if (!subId && !disId && !provId) {
+    // ----- พื้นที่: กรอบแผนที่ (bbox) หรือ ใกล้ฉัน (lat/lng/radius) -----
+    let box = null;         // { minLat, minLng, maxLat, maxLng } — ใช้กรองหยาบใน SQL
+    let center = null;      // { lat, lng, radiusKm } — ถ้าค้นแบบรัศมี ใช้คัดระยะจริงทีหลัง
+
+    if (q.bbox !== undefined && q.bbox !== '') {
+      const parsed = parseBBox(q.bbox);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+      box = parsed;
+    } else if (q.lat !== undefined && q.lng !== undefined) {
+      const geo = parseLatLng(q.lat, q.lng);
+      if (!geo.ok) return res.status(400).json({ error: geo.error });
+
+      const radiusKm = parseRadiusKm(q.radius_km);
+      if (radiusKm === 'INVALID') {
+        return res.status(400).json({ error: 'radius_km ต้องเป็นจำนวนเต็ม 1-200' });
+      }
+      const r = radiusKm === null ? DEFAULT_RADIUS_KM : radiusKm;
+      center = { lat: geo.lat, lng: geo.lng, radiusKm: r };
+      box = bboxFromRadius(geo.lat, geo.lng, r);
+    } else {
       return res.status(400).json({
-        error: 'กรุณาระบุพื้นที่ค้นหาอย่างน้อย 1 ระดับ (subdistrict_id / district_id / province_id)',
+        error:
+          'กรุณาระบุพื้นที่ค้นหา: bbox=min_lat,min_lng,max_lat,max_lng (กรอบแผนที่) หรือ lat&lng&radius_km (ใกล้ฉัน)',
       });
     }
 
-    const autoExpand = String(q.auto_expand || '').toLowerCase() === 'true';
-    let limit = Number(q.limit) || 20;
-    if (!Number.isInteger(limit) || limit < 1) limit = 20;
-    if (limit > 100) limit = 100;
+    // ช่างที่ติดงานอยู่จะหายจากแผนที่ (docs/04 ข้อ 4.5) เว้นแต่ขอมาชัดเจน
+    const includeBusy = String(q.include_busy || '').toLowerCase() === 'true';
+
+    let limit = Number(q.limit) || 50;
+    if (!Number.isInteger(limit) || limit < 1) limit = 50;
+    if (limit > 200) limit = 200;
 
     // ----- เลือก skill filter ที่เฉพาะที่สุด -----
     //   skill > subcategory > category
@@ -441,68 +579,78 @@ router.get('/search', async (req, res) => {
       }
     }
 
-    // ----- scope filter (พื้นที่) -----
-    const scopes = [];
-    if (subId) scopes.push({ level: 'subdistrict', field: 'u.user_subdistrict_id', val: subId });
-    if (disId) scopes.push({ level: 'district', field: 'u.user_district_id', val: disId });
-    if (provId) scopes.push({ level: 'province', field: 'u.user_province_id', val: provId });
-    const scopesToTry = autoExpand ? scopes : [scopes[0]];
+    // ----- main query: กรองหยาบด้วยกรอบสี่เหลี่ยมก่อน (ใช้ idx_worker_geo) -----
+    //  ค้นแบบรัศมี: ดึงเผื่อจาก DB แล้วค่อยคัดระยะจริงด้วย Haversine ใน JS
+    const sqlLimit = center ? Math.min(limit * 4, 800) : limit;
+    const availCond = includeBusy ? '' : `AND w.worker_availability = 'free'`;
 
-    // ----- main query -----
-    let results = [];
-    let matchedLevel = null;
-    for (const scope of scopesToTry) {
-      // ใช้ EXISTS เพื่อ filter ช่างที่มีสกิลตรงเงื่อนไข - ป้องกัน row ซ้ำ
-      const params = [];
-      if (skillParam !== null) params.push(skillParam);
-      params.push(scope.val);
+    const params = [box.minLat, box.maxLat, box.minLng, box.maxLng];
+    if (skillParam !== null) params.push(skillParam);
 
-      const [rows] = await pool.execute(
-        `SELECT
-            w.worker_id,
-            w.worker_user_id,
-            w.worker_job_tickets,
-            w.worker_total_jobs,
-            w.worker_resume,
-            u.user_id,
-            u.user_name,
-            u.user_lastname,
-            u.user_image,
-            u.user_phone,
-            u.user_address,
-            u.user_province_id,
-            u.user_district_id,
-            u.user_subdistrict_id,
-            p.province_name_th,
-            d.district_name_th,
-            s.subdistrict_name_th
-          FROM worker_chaungthai w
-          JOIN user_chaungthai u ON u.user_id = w.worker_user_id
-          LEFT JOIN location_province_chaungthai p ON p.province_id = u.user_province_id
-          LEFT JOIN location_district_chaungthai d ON d.district_id = u.user_district_id
-          LEFT JOIN location_subdistrict_chaungthai s ON s.subdistrict_id = u.user_subdistrict_id
-          WHERE u.user_status = 'Active'
-            AND ${scope.field} = ?
-            AND EXISTS (
-              SELECT 1 FROM workerskill_chaungthai ws
-              JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
-              LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
-              WHERE ws.workerskill_worker_id = w.worker_id
-                AND sk.skill_is_active = 1
-                ${skillCond}
-            )
-          ORDER BY w.worker_total_jobs DESC, w.worker_id ASC
-          LIMIT ${limit}`,
-        // params order: [skillParam?, scope.val] — แต่เราเอา scope.val ก่อนใน WHERE หลัก แล้ว skillParam ใน EXISTS
-        // ปรับใหม่: scope.val ก่อน, skillParam หลัง
-        skillParam !== null ? [scope.val, skillParam] : [scope.val]
-      );
+    let [results] = await pool.execute(
+      `SELECT
+          w.worker_id,
+          w.worker_user_id,
+          w.worker_job_tickets,
+          w.worker_total_jobs,
+          w.worker_resume,
+          w.worker_lat,
+          w.worker_lng,
+          w.worker_service_radius_km,
+          w.worker_availability,
+          w.worker_crime_check_status,
+          u.user_id,
+          u.user_name,
+          u.user_lastname,
+          u.user_image,
+          u.user_bio,
+          u.user_identity_verified_at
+        FROM worker_chaungthai w
+        JOIN user_chaungthai u ON u.user_id = w.worker_user_id
+        WHERE u.user_status = 'Active'
+          AND w.worker_lat IS NOT NULL
+          AND w.worker_lng IS NOT NULL
+          AND w.worker_lat BETWEEN ? AND ?
+          AND w.worker_lng BETWEEN ? AND ?
+          ${availCond}
+          AND EXISTS (
+            SELECT 1 FROM workerskill_chaungthai ws
+            JOIN skill_chaungthai sk ON sk.skill_id = ws.workerskill_skill_id
+            LEFT JOIN skill_subcategory_chaungthai sub ON sub.skill_subcategory_id = sk.skill_subcategory_id
+            WHERE ws.workerskill_worker_id = w.worker_id
+              AND sk.skill_is_active = 1
+              ${skillCond}
+          )
+        ORDER BY w.worker_total_jobs DESC, w.worker_id ASC
+        LIMIT ${sqlLimit}`,
+      params
+    );
 
-      if (rows.length > 0) {
-        results = rows;
-        matchedLevel = scope.level;
-        break;
-      }
+    // ----- ค้นแบบรัศมี: คัดวงกลมจริง + เรียงตามใกล้สุด -----
+    if (center) {
+      results = results
+        .map((r) => ({
+          ...r,
+          distance_km: Number(
+            distanceKm(center.lat, center.lng, Number(r.worker_lat), Number(r.worker_lng)).toFixed(2)
+          ),
+        }))
+        .filter((r) => r.distance_km <= center.radiusKm)
+        .sort((a, b) => a.distance_km - b.distance_km)
+        .slice(0, limit);
+    }
+
+    // ----- เปิดเผยพิกัด 2 ระดับ: ยังไม่ยืนยันตัวตน = เห็นแค่จุดเบลอ ~1 กม. -----
+    const viewerVerified = await isViewerVerified(req.user);
+    for (const r of results) {
+      const isOwner = Boolean(req.user && req.user.user_id === r.worker_user_id);
+      const coords = publicCoords(r.worker_lat, r.worker_lng, isOwner || viewerVerified);
+      r.worker_lat = coords.lat;
+      r.worker_lng = coords.lng;
+      r.location_is_blurred = coords.is_blurred;
+      // ไม่ส่งข้อมูลติดต่อออกไปกับผลค้นหา — ดูได้ในหน้าโปรไฟล์/ห้องแชตเท่านั้น
+      r.is_identity_verified = Boolean(r.user_identity_verified_at);
+      delete r.user_identity_verified_at;
     }
 
     // ดึงสกิลทั้งหมดของช่างแต่ละคน (เพื่อโชว์ "ความสามารถ" ในการ์ด)
@@ -551,9 +699,16 @@ router.get('/search', async (req, res) => {
     return res.json({
       filter: filterInfo,
       applied_filter: appliedFilter,  // 'skill' | 'subcategory' | 'category' | null
-      query: { subdistrict_id: subId, district_id: disId, province_id: provId },
-      auto_expand: autoExpand,
-      matched_level: matchedLevel,
+      query: {
+        mode: center ? 'radius' : 'bbox',
+        bbox: {
+          min_lat: box.minLat, min_lng: box.minLng,
+          max_lat: box.maxLat, max_lng: box.maxLng,
+        },
+        center: center ? { lat: center.lat, lng: center.lng, radius_km: center.radiusKm } : null,
+        include_busy: includeBusy,
+        limit,
+      },
       total: results.length,
       workers: results,
     });
@@ -641,20 +796,15 @@ router.get('/:worker_id', optionalAuth, async (req, res) => {
           w.worker_crime_document_url,
           w.worker_crime_check_status,
           w.worker_created_at,
+          w.worker_lat, w.worker_lng,
+          w.worker_service_radius_km, w.worker_availability,
           u.user_id, u.user_name, u.user_lastname, u.user_email,
           u.user_image, u.user_phone, u.user_bio,
-          u.user_province_id, u.user_district_id, u.user_subdistrict_id,
           u.user_address, u.user_status, u.user_role,
           u.user_email_verified_at, u.user_phone_verified_at,
-          u.user_identity_verified_at,
-          p.province_name_th, p.province_name_en,
-          d.district_name_th, d.district_name_en,
-          s.subdistrict_name_th, s.subdistrict_name_en, s.subdistrict_zip_code
+          u.user_identity_verified_at
         FROM worker_chaungthai w
         JOIN user_chaungthai u ON u.user_id = w.worker_user_id
-        LEFT JOIN location_province_chaungthai p ON p.province_id = u.user_province_id
-        LEFT JOIN location_district_chaungthai d ON d.district_id = u.user_district_id
-        LEFT JOIN location_subdistrict_chaungthai s ON s.subdistrict_id = u.user_subdistrict_id
         WHERE w.worker_id = ?
           AND u.user_status = 'Active'
         LIMIT 1`,
@@ -702,7 +852,12 @@ router.get('/:worker_id', optionalAuth, async (req, res) => {
       isFavorited = fav.length > 0;
     }
 
-    // ----- 5. response -----
+    // ----- 5. พิกัด: เจ้าของหมุด/คนที่ยืนยันตัวตนแล้ว เห็นจุดจริง นอกนั้นเห็นจุดเบลอ -----
+    const isOwner = Boolean(req.user && req.user.user_id === w.worker_user_id);
+    const viewerVerified = await isViewerVerified(req.user);
+    const coords = publicCoords(w.worker_lat, w.worker_lng, isOwner || viewerVerified);
+
+    // ----- 6. response -----
     return res.json({
       is_favorited: isFavorited,
       worker: {
@@ -715,6 +870,11 @@ router.get('/:worker_id', optionalAuth, async (req, res) => {
         worker_crime_document_url: w.worker_crime_document_url,
         worker_crime_check_status: w.worker_crime_check_status,
         worker_created_at: w.worker_created_at,
+        worker_lat: coords.lat,
+        worker_lng: coords.lng,
+        worker_service_radius_km: w.worker_service_radius_km,
+        worker_availability: w.worker_availability,
+        location_is_blurred: coords.is_blurred,
       },
       user: {
         user_id: w.user_id,
@@ -725,23 +885,11 @@ router.get('/:worker_id', optionalAuth, async (req, res) => {
         user_phone: w.user_phone,
         user_bio: w.user_bio,
         user_address: w.user_address,
-        user_province_id: w.user_province_id,
-        user_district_id: w.user_district_id,
-        user_subdistrict_id: w.user_subdistrict_id,
         user_status: w.user_status,
         user_role: w.user_role,
         user_email_verified_at: w.user_email_verified_at,
         user_phone_verified_at: w.user_phone_verified_at,
         user_identity_verified_at: w.user_identity_verified_at,
-      },
-      location: {
-        province_name_th: w.province_name_th,
-        province_name_en: w.province_name_en,
-        district_name_th: w.district_name_th,
-        district_name_en: w.district_name_en,
-        subdistrict_name_th: w.subdistrict_name_th,
-        subdistrict_name_en: w.subdistrict_name_en,
-        zip_code: w.subdistrict_zip_code,
       },
       skills,
       portfolio_images: images,

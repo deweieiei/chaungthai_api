@@ -442,6 +442,33 @@ router.patch('/:id/status', async (req, res) => {
       params
     );
 
+    // ----- ช่างรับทีละงาน: ติดงาน = หายจากแผนที่ (docs/04 ข้อ 4.5) -----
+    const BUSY_STATUSES = ['not_started', 'in_progress'];
+    const FREE_STATUSES = ['completed', 'declined', 'cancelled'];
+
+    if (BUSY_STATUSES.includes(newStatus)) {
+      await conn.execute(
+        `UPDATE worker_chaungthai SET worker_availability = 'busy' WHERE worker_user_id = ?`,
+        [job.job_worker_id]
+      );
+    } else if (FREE_STATUSES.includes(newStatus)) {
+      // คืนสถานะว่างเฉพาะเมื่อไม่เหลืองานอื่นที่ยังค้างอยู่
+      // (ปฏิเสธงาน A ทั้งที่กำลังทำงาน B อยู่ ต้องไม่ทำให้กลับขึ้นแผนที่)
+      const [busyLeft] = await conn.execute(
+        `SELECT 1 FROM job_chaungthai
+          WHERE job_worker_id = ? AND job_id <> ?
+            AND job_status IN ('not_started', 'in_progress')
+          LIMIT 1`,
+        [job.job_worker_id, jobId]
+      );
+      if (busyLeft.length === 0) {
+        await conn.execute(
+          `UPDATE worker_chaungthai SET worker_availability = 'free' WHERE worker_user_id = ?`,
+          [job.job_worker_id]
+        );
+      }
+    }
+
     await conn.commit();
     conn.release();
 

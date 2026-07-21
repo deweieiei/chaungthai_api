@@ -27,15 +27,12 @@ router.get('/workers', async (req, res) => {
       `SELECT
           f.fav_id, f.fav_worker_id AS worker_id, f.fav_created_at,
           w.worker_user_id, w.worker_total_jobs,
+          w.worker_availability, w.worker_service_radius_km,
           u.user_id, u.user_name, u.user_lastname, u.user_image,
-          u.user_identity_verified_at,
-          p.province_name_th, d.district_name_th, s.subdistrict_name_th
+          u.user_identity_verified_at
         FROM favorite_worker_chaungthai f
         JOIN worker_chaungthai w ON w.worker_id = f.fav_worker_id
         JOIN user_chaungthai u ON u.user_id = w.worker_user_id
-        LEFT JOIN location_province_chaungthai p ON p.province_id = u.user_province_id
-        LEFT JOIN location_district_chaungthai d ON d.district_id = u.user_district_id
-        LEFT JOIN location_subdistrict_chaungthai s ON s.subdistrict_id = u.user_subdistrict_id
         WHERE f.fav_user_id = ?
           AND u.user_status = 'Active'
         ORDER BY f.fav_created_at DESC

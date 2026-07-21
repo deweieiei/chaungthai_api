@@ -14,6 +14,7 @@ const bcrypt = require('bcrypt');
 const multer = require('multer');
 const pool = require('../db');
 const { verifyToken } = require('../middleware/auth');
+const { parseLatLng } = require('../lib/geo');
 
 const router = express.Router();
 
@@ -61,7 +62,7 @@ const avatarUpload = multer({
 const PUBLIC_FIELDS = `
   user_id, user_name, user_lastname, user_email, user_image,
   user_phone, user_birthday, user_address, user_bio,
-  user_province_id, user_district_id, user_subdistrict_id,
+  user_lat, user_lng,
   user_role, user_status,
   user_email_verified_at, user_phone_verified_at, user_identity_verified_at,
   user_created_at, user_updated_at, user_last_login_at
@@ -78,65 +79,33 @@ const UPDATABLE_FIELDS = [
   'user_address',
   'user_image',
   'user_bio',
-  'user_province_id',
-  'user_district_id',
-  'user_subdistrict_id',
+  'user_lat',
+  'user_lng',
 ];
 
-// field ที่เป็น location id (จะ validate type + parent-child match)
-const LOCATION_ID_FIELDS = ['user_province_id', 'user_district_id', 'user_subdistrict_id'];
-
 /**
- * ตรวจสอบ location ids:
- * - ทุก id ที่ส่งมาต้องเป็น integer
- * - ถ้าส่งหลาย id มาด้วยกัน parent-child ต้องตรง
- * - id ต้องมีอยู่ใน DB
+ * ตรวจพิกัดที่อยู่ผู้ใช้ (ใช้เปิดแผนที่ที่ตำแหน่งตัวเอง)
+ * - ต้องส่ง lat/lng มาคู่กันเสมอ
+ * - ส่ง null ทั้งคู่ = ลบหมุดออก
  *
  * Return { ok: true } หรือ { ok: false, error: '...' }
  */
-async function validateLocationIds(pool, ids) {
-  const { user_province_id: p, user_district_id: d, user_subdistrict_id: s } = ids;
-
-  // 1. ตรวจ type
-  for (const k of LOCATION_ID_FIELDS) {
-    if (ids[k] !== undefined && ids[k] !== null) {
-      if (!Number.isInteger(ids[k]) || ids[k] < 1) {
-        return { ok: false, error: `${k} ต้องเป็นจำนวนเต็มบวก` };
-      }
-    }
+function validateUserCoords(fields) {
+  const hasLat = fields.user_lat !== undefined;
+  const hasLng = fields.user_lng !== undefined;
+  if (!hasLat && !hasLng) return { ok: true };
+  if (hasLat !== hasLng) {
+    return { ok: false, error: 'ต้องส่ง user_lat และ user_lng มาคู่กัน' };
   }
 
-  // 2. ตรวจ exists + parent-child
-  if (p !== undefined && p !== null) {
-    const [r] = await pool.execute(
-      'SELECT 1 FROM location_province_chaungthai WHERE province_id = ?',
-      [p]
-    );
-    if (r.length === 0) return { ok: false, error: 'user_province_id ไม่พบในระบบ' };
-  }
+  // ส่ง null ทั้งคู่ = ล้างพิกัดทิ้ง
+  if (fields.user_lat === null && fields.user_lng === null) return { ok: true };
 
-  if (d !== undefined && d !== null) {
-    const [r] = await pool.execute(
-      'SELECT district_province_id FROM location_district_chaungthai WHERE district_id = ?',
-      [d]
-    );
-    if (r.length === 0) return { ok: false, error: 'user_district_id ไม่พบในระบบ' };
-    if (p !== undefined && p !== null && r[0].district_province_id !== p) {
-      return { ok: false, error: 'user_district_id ไม่อยู่ใน user_province_id ที่เลือก' };
-    }
-  }
+  const geo = parseLatLng(fields.user_lat, fields.user_lng);
+  if (!geo.ok) return { ok: false, error: geo.error };
 
-  if (s !== undefined && s !== null) {
-    const [r] = await pool.execute(
-      'SELECT subdistrict_district_id FROM location_subdistrict_chaungthai WHERE subdistrict_id = ?',
-      [s]
-    );
-    if (r.length === 0) return { ok: false, error: 'user_subdistrict_id ไม่พบในระบบ' };
-    if (d !== undefined && d !== null && r[0].subdistrict_district_id !== d) {
-      return { ok: false, error: 'user_subdistrict_id ไม่อยู่ใน user_district_id ที่เลือก' };
-    }
-  }
-
+  fields.user_lat = geo.lat;
+  fields.user_lng = geo.lng;
   return { ok: true };
 }
 
@@ -216,13 +185,13 @@ router.put('/:user_id', verifyToken, async (req, res) => {
     for (const key of Object.keys(body)) {
       if (UPDATABLE_FIELDS.includes(key)) {
         let val = body[key];
-        // location id: รับเป็น number หรือ string ตัวเลข -> แปลงเป็น number
-        if (LOCATION_ID_FIELDS.includes(key)) {
+        // พิกัด: รับเป็น number หรือ string ตัวเลข -> แปลงเป็น number
+        if (key === 'user_lat' || key === 'user_lng') {
           if (val === null || val === '') {
             val = null;
           } else {
             const n = Number(val);
-            val = Number.isFinite(n) ? n : val; // ถ้าแปลงไม่ได้ปล่อยให้ validate ทีหลัง reject
+            val = Number.isFinite(n) ? n : val; // แปลงไม่ได้ปล่อยให้ validate ทีหลัง reject
           }
         } else if (typeof val === 'string') {
           // string: trim, ถ้าว่าง -> null (สำหรับ "clear" field)
@@ -271,12 +240,10 @@ router.put('/:user_id', verifyToken, async (req, res) => {
       }
     }
 
-    // ตรวจ location ids (type + exists + parent-child)
-    if (LOCATION_ID_FIELDS.some((k) => k in fieldsToUpdate)) {
-      const v = await validateLocationIds(pool, fieldsToUpdate);
-      if (!v.ok) {
-        return res.status(400).json({ error: v.error });
-      }
+    // ตรวจพิกัด (ต้องมาคู่กัน + อยู่ในขอบเขตประเทศไทย)
+    const coordCheck = validateUserCoords(fieldsToUpdate);
+    if (!coordCheck.ok) {
+      return res.status(400).json({ error: coordCheck.error });
     }
 
     // ----- 5. สร้าง SQL UPDATE แบบ dynamic -----

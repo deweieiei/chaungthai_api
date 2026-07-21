@@ -22,7 +22,6 @@ const { initSocket } = require('./src/socket');
 const authRoutes = require('./src/routes/auth');
 const userRoutes = require('./src/routes/users');
 const skillRoutes = require('./src/routes/skills');
-const locationRoutes = require('./src/routes/locations');
 const workerRoutes = require('./src/routes/workers');
 const chatRoutes = require('./src/routes/chat');
 const jobRoutes = require('./src/routes/jobs');
@@ -97,14 +96,11 @@ app.use('/api/users', userRoutes);
 //  → PUT  /api/users/:user_id  (auth required)
 app.use('/api/skills', skillRoutes);
 //  → GET  /api/skills  (tree: category -> subcategory -> skill)
-app.use('/api/locations', locationRoutes);
-//  → GET  /api/locations/provinces
-//  → GET  /api/locations/districts?province_id=X
-//  → GET  /api/locations/subdistricts?district_id=X
 app.use('/api/workers', workerRoutes);
-//  → POST /api/workers              (auth required)
-//  → PUT  /api/workers/:id/skills   (auth + owner)
-//  → GET  /api/workers/search       (public)
+//  → POST /api/workers                (auth required)
+//  → PUT  /api/workers/:id/skills     (auth + owner)
+//  → PUT  /api/workers/:id/location   (auth + owner) — ปักหมุดจุดรับงาน
+//  → GET  /api/workers/search         (public) — ค้นบนแผนที่: bbox หรือ lat/lng/radius_km
 app.use('/api/chat', chatRoutes);
 //  → GET  /api/chat/unread-count
 //  → GET  /api/chat/conversations
