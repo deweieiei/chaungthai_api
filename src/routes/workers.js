@@ -485,14 +485,16 @@ router.get('/search', optionalAuth, async (req, res) => {
     const geo = parseLatLng(q.lat, q.lng);
     if (!geo.ok) return res.status(400).json({ error: geo.error });
 
-    const radiusKm = parseRadiusKm(q.radius_km);
-    if (radiusKm === 'INVALID') {
-      return res.status(400).json({
-        error: `radius_km ต้องเป็นจำนวนเต็ม 1-${MAX_SEARCH_RADIUS_KM}`,
-      });
+    //  ไม่ใช้ parseRadiusKm ตรงนี้ เพราะตัวนั้นคุมรัศมี "รับงานของช่าง" (สูงสุด 200)
+    //  ส่วนรัศมี "การมองเห็นบนแผนที่" หั่นลงเงียบ ๆ ไม่ต้อง error
+    let r = DEFAULT_RADIUS_KM;
+    if (q.radius_km !== undefined && q.radius_km !== '') {
+      const n = Number(q.radius_km);
+      if (!Number.isFinite(n) || n < 1) {
+        return res.status(400).json({ error: 'radius_km ต้องเป็นตัวเลขตั้งแต่ 1 ขึ้นไป' });
+      }
+      r = Math.min(Math.round(n), MAX_SEARCH_RADIUS_KM);
     }
-    // ส่งเกินมาก็หั่นลงให้เท่าเพดาน ไม่ต้อง error
-    const r = Math.min(radiusKm === null ? DEFAULT_RADIUS_KM : radiusKm, MAX_SEARCH_RADIUS_KM);
 
     const center = { lat: geo.lat, lng: geo.lng, radiusKm: r };
     const box = bboxFromRadius(geo.lat, geo.lng, r);   // กรองหยาบใน SQL ก่อน
