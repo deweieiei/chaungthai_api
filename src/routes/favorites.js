@@ -1,7 +1,10 @@
 // ============================================================
 //  Favorites Routes
 //  Mounted at: /api/favorites
-//  ทุก endpoint ต้อง login
+//  ทุก endpoint ต้อง login + เป็น "บัญชีผู้ว่าจ้าง" เท่านั้น
+//
+//  การติดดาวช่างไว้จ้างทีหลังเป็นเรื่องของฝั่งผู้ว่าจ้างล้วน ๆ
+//  บัญชีช่างไม่มีเมนูหาช่างแล้ว จึงไม่ควรเรียก endpoint กลุ่มนี้ได้
 //
 //  GET    /api/favorites/workers           - รายการช่างที่ฉันติดดาว
 //  POST   /api/favorites/workers/:worker_id  - กดดาว (idempotent)
@@ -10,10 +13,11 @@
 
 const express = require('express');
 const pool = require('../db');
-const { verifyToken } = require('../middleware/auth');
+const { verifyToken, requireAccountType } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(verifyToken);
+router.use(requireAccountType('employer'));
 
 // ------------------------------------------------------------
 //  GET /api/favorites/workers
