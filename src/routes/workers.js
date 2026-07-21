@@ -621,8 +621,14 @@ router.get('/search', optionalAuth, async (req, res) => {
               AND sk.skill_is_active = 1
               ${skillCond}
           )
-        ORDER BY w.worker_total_jobs DESC, w.worker_id ASC
         LIMIT ${sqlLimit}`,
+      //  *** ห้ามใส่ ORDER BY ที่นี่ ***
+      //  เคยมี ORDER BY worker_total_jobs DESC — ทดสอบด้วยช่าง 1 ล้านคนแล้วพบว่า
+      //  มันบังคับให้ MySQL ตรวจ EXISTS(สกิล) ครบทุกแถวที่อยู่ในกรอบก่อนค่อยเรียง
+      //  (ซูมสุด + กรองหมวด = 850,000 แถว → 35 วินาที)
+      //  พอไม่มี ORDER BY เครื่องจะหยุดทันทีที่เจอครบ LIMIT → 0.06 วินาที
+      //  แผนที่ต้องการแค่ "ใครอยู่ในกรอบที่เห็น" ไม่ต้องเรียงทั้งประเทศอยู่แล้ว
+      //  ส่วนโหมดรัศมี เรียงตามระยะทางใน JS ทีหลัง (ดูด้านล่าง)
       params
     );
 
